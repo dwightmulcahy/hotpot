@@ -1,0 +1,24 @@
+[[rule]]
+name = "phpmyadmin"
+action = "tarpit"
+regex = ["^/(phpmyadmin|pma|myadmin)(/|$)"]
+category = "phpmyadmin-probe"
+status = 200
+content_type = "text/html; charset=utf-8"
+response = "<html><head><title>phpMyAdmin</title></head><body>Welcome to phpMyAdmin</body></html>"
+
+[[rule]]
+name = "phpunit-rce"
+action = "tarpit"
+regex = ["/vendor/phpunit/.*/eval-stdin\\.php$"]
+category = "phpunit-rce-probe"
+status = 200
+response = ""
+
+[[rule]]
+name = "webshell-names"
+action = "deceive"
+regex = ["/(shell|c99|r57|cmd|wso)\\.php$"]
+category = "webshell-probe"
+status = 404
+response = "Not Found"

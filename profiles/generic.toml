@@ -1,0 +1,15 @@
+[[rule]]
+name = "common-admin-panels"
+action = "deceive"
+paths = ["/adminer.php", "/server-status", "/actuator/env", "/actuator/heapdump"]
+category = "admin-probe"
+status = 404
+response = "Not Found"
+
+[[rule]]
+name = "backup-files"
+action = "deceive"
+regex = ["\\.(bak|old|orig|save|swp|sql|zip|tar|tgz|gz)$"]
+category = "backup-discovery"
+status = 404
+response = "Not Found"

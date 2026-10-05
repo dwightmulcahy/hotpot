@@ -1,0 +1,74 @@
+services:
+  # Your existing service. The application itself is unchanged.
+  # The only networking change is that its host-facing `ports:` mapping moves
+  # to Hotpot so Hotpot can see requests first.
+  myapp:
+    image: your/existing-image:latest
+    expose:
+      - "3000"
+    networks:
+      - hotpot_backend
+
+  hotpot:
+    build: .
+    container_name: hotpot
+    restart: unless-stopped
+    depends_on:
+      - myapp
+    ports:
+      - "3000:8080"
+    environment:
+      HOTPOT_UPSTREAM: http://myapp:3000
+      HOTPOT_PROFILES: wordpress,secrets,git,php,generic
+      HOTPOT_TARPIT_ENABLED: "true"
+      HOTPOT_TARPIT_MAX_CONCURRENT: "10"
+      HOTPOT_TARPIT_INITIAL_DELAY: "1.0"
+      HOTPOT_TARPIT_CHUNK_DELAY: "2.0"
+      HOTPOT_TARPIT_MAX_SECONDS: "20"
+      HOTPOT_TARPIT_ESCALATED_MAX_SECONDS: "60"
+
+      # Trusted sources bypass deception/tarpit and are proxied normally.
+      # Accepts individual IPs or CIDRs, comma-separated. Leave empty by default.
+      HOTPOT_ALLOW_CIDRS: ${HOTPOT_ALLOW_CIDRS:-}
+
+      # Retention / housekeeping. SQLite + JSONL probe events are retained 30 days;
+      # inactive attacker summaries are retained 90 days. Cleanup runs every 6 hours.
+      HOTPOT_RETENTION_DAYS: "30"
+      HOTPOT_ATTACKER_RETENTION_DAYS: "90"
+      HOTPOT_HOUSEKEEPING_INTERVAL_SECONDS: "21600"
+
+      # Escalation alerts. Nothing is sent unless webhook and/or SMTP is configured.
+      HOTPOT_NOTIFY_MIN_LEVEL: "3"
+      HOTPOT_NOTIFY_COOLDOWN_SECONDS: "3600"
+      HOTPOT_NOTIFY_WEBHOOK_URL: ${HOTPOT_NOTIFY_WEBHOOK_URL:-}
+      HOTPOT_NOTIFY_WEBHOOK_BEARER: ${HOTPOT_NOTIFY_WEBHOOK_BEARER:-}
+
+      # Optional SMTP notification channel.
+      HOTPOT_SMTP_HOST: ${HOTPOT_SMTP_HOST:-}
+      HOTPOT_SMTP_PORT: ${HOTPOT_SMTP_PORT:-587}
+      HOTPOT_SMTP_STARTTLS: ${HOTPOT_SMTP_STARTTLS:-true}
+      HOTPOT_SMTP_USERNAME: ${HOTPOT_SMTP_USERNAME:-}
+      HOTPOT_SMTP_PASSWORD: ${HOTPOT_SMTP_PASSWORD:-}
+      HOTPOT_SMTP_FROM: ${HOTPOT_SMTP_FROM:-}
+      HOTPOT_SMTP_TO: ${HOTPOT_SMTP_TO:-}
+
+      # Set true only when Hotpot itself is behind a reverse proxy you control.
+      HOTPOT_TRUST_FORWARDED_FOR: "false"
+      # Required to enable dashboard/status/intelligence endpoints. Health remains public.
+      # Use a long random value and send Authorization: Bearer <token>.
+      HOTPOT_ADMIN_TOKEN: ${HOTPOT_ADMIN_TOKEN:-}
+    volumes:
+      - ./data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      - hotpot_backend
+
+networks:
+  hotpot_backend:
+    driver: bridge

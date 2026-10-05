@@ -1,0 +1,28 @@
+name: Bug report
+description: Report a reproducible Hotpot problem
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What happened and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+      description: Minimal steps, Compose excerpt, and relevant logs with secrets removed.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version / image tag
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      placeholder: Docker Engine version, NAS/OS, amd64/arm64

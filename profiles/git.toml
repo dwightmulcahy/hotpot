@@ -1,0 +1,16 @@
+[[rule]]
+name = "git-metadata"
+action = "tarpit"
+path_prefixes = ["/.git/"]
+category = "source-control-discovery"
+status = 200
+content_type = "text/plain; charset=utf-8"
+response = "ref: refs/heads/main\n"
+
+[[rule]]
+name = "svn-metadata"
+action = "deceive"
+path_prefixes = ["/.svn/"]
+category = "source-control-discovery"
+status = 404
+response = "Not Found"

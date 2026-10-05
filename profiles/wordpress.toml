@@ -1,0 +1,34 @@
+[[rule]]
+name = "wordpress-install"
+action = "tarpit"
+paths = ["/wp-admin/install.php", "/wp-admin/setup-config.php"]
+category = "wordpress-install"
+status = 200
+content_type = "text/html; charset=utf-8"
+response = """<!doctype html><html><head><title>WordPress › Installation</title></head><body><h1>Welcome to WordPress</h1><p>Before getting started, we need some information on the database.</p></body></html>"""
+
+[[rule]]
+name = "wordpress-login"
+action = "tarpit"
+paths = ["/wp-login.php"]
+category = "wordpress-login"
+status = 200
+content_type = "text/html; charset=utf-8"
+response = """<!doctype html><html><head><title>Log In ‹ WordPress</title></head><body><form method=post><input name=log><input name=pwd type=password><button>Log In</button></form></body></html>"""
+
+[[rule]]
+name = "wordpress-xmlrpc"
+action = "tarpit"
+paths = ["/xmlrpc.php"]
+category = "wordpress-xmlrpc"
+status = 200
+content_type = "text/xml; charset=utf-8"
+response = "<?xml version=\"1.0\"?><methodResponse><params></params></methodResponse>"
+
+[[rule]]
+name = "wordpress-tree"
+action = "deceive"
+path_prefixes = ["/wp-admin/", "/wp-content/", "/wp-includes/", "/wp-json/"]
+category = "wordpress-enumeration"
+status = 404
+response = "Not Found"
