@@ -350,3 +350,63 @@ HOTPOT_SMTP_TO: "admin@example.com,security@example.com"
 ```
 
 SMTP credentials are used only for delivery and are not written to attack logs or SQLite.
+
+## Cloudflare Tunnel mode
+
+Hotpot can sit directly behind `cloudflared` and use Cloudflare's `CF-Connecting-IP`
+header as the attacker identity while retaining the local `cloudflared` address as
+`proxy_ip`.
+
+Use:
+
+```yaml
+HOTPOT_CLIENT_IP_MODE: cloudflare
+HOTPOT_TRUSTED_PROXY_CIDRS: 172.30.0.0/24
+```
+
+Cloudflare mode intentionally **fails closed at startup** if no trusted proxy CIDR is
+configured. Hotpot will only honor `CF-Connecting-IP` when the actual TCP peer belongs
+to `HOTPOT_TRUSTED_PROXY_CIDRS`; otherwise it ignores the header and records the peer
+address. This prevents a direct client from forging Cloudflare headers to poison
+attacker history or influence allowlist decisions.
+
+The recommended Docker layout is:
+
+```text
+Internet
+   |
+Cloudflare edge
+   |
+Cloudflare Tunnel
+   |
+cloudflared  (trusted proxy network)
+   |
+Hotpot       (no host port)
+   |
+application  (private backend network)
+```
+
+See [`compose.cloudflare.example.yml`](compose.cloudflare.example.yml) for a complete
+example with a deterministic Docker subnet. In the Cloudflare dashboard, set the
+published application's Service URL to `http://hotpot:8080` when `cloudflared` and
+Hotpot share the same Docker network.
+
+Probe events in this mode include both identities:
+
+```json
+{
+  "client_ip": "203.0.113.42",
+  "proxy_ip": "172.30.0.10",
+  "client_ip_source": "cf-connecting-ip",
+  "trusted_proxy": true
+}
+```
+
+### Client IP modes
+
+- `direct` — default; always use the TCP peer and ignore forwarding headers.
+- `cloudflare` — trust `CF-Connecting-IP` only from configured trusted proxy CIDRs.
+- `x-forwarded-for` — trust the left-most `X-Forwarded-For` address only from configured trusted proxy CIDRs.
+
+The older `HOTPOT_TRUST_FORWARDED_FOR` switch has been replaced by these explicit modes
+because blindly trusting forwarded headers is unsafe.

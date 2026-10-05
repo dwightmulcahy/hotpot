@@ -52,8 +52,10 @@ services:
       HOTPOT_SMTP_FROM: ${HOTPOT_SMTP_FROM:-}
       HOTPOT_SMTP_TO: ${HOTPOT_SMTP_TO:-}
 
-      # Set true only when Hotpot itself is behind a reverse proxy you control.
-      HOTPOT_TRUST_FORWARDED_FOR: "false"
+      # Client IP handling. "direct" ignores all forwarding headers.
+      # Other modes require HOTPOT_TRUSTED_PROXY_CIDRS.
+      HOTPOT_CLIENT_IP_MODE: "direct"
+      HOTPOT_TRUSTED_PROXY_CIDRS: ""
       # Required to enable dashboard/status/intelligence endpoints. Health remains public.
       # Use a long random value and send Authorization: Bearer <token>.
       HOTPOT_ADMIN_TOKEN: ${HOTPOT_ADMIN_TOKEN:-}

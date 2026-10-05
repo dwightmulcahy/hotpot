@@ -13,7 +13,7 @@ from .config import Settings
 from .dashboard import render_dashboard
 from .intelligence import classify, escalation_for
 from .logging import EventLogger
-from .network import Allowlist
+from .network import Allowlist, ClientIdentity, ClientIPResolver
 from .notifications import Notifier
 from .rules import Rule, RuleEngine
 from .store import IntelligenceStore
@@ -40,11 +40,8 @@ def clean_headers(headers, *, response: bool = False) -> CIMultiDict:
     return out
 
 
-def peer_ip(request: web.Request, trust_forwarded_for: bool) -> str:
-    if trust_forwarded_for:
-        xff = request.headers.get("X-Forwarded-For")
-        if xff:
-            return xff.split(",", 1)[0].strip()
+
+def transport_peer_ip(request: web.Request) -> str:
     peer = request.transport.get_extra_info("peername") if request.transport else None
     return peer[0] if peer else "unknown"
 
@@ -56,6 +53,7 @@ class Hotpot:
         self.events = EventLogger(settings.data_dir)
         self.store = IntelligenceStore(settings.data_dir)
         self.allowlist = Allowlist(settings.allow_cidrs)
+        self.client_ips = ClientIPResolver(settings.client_ip_mode, settings.trusted_proxy_cidrs)
         self.notifier = Notifier(settings)
         self.client: ClientSession | None = None
         self.housekeeping_task: asyncio.Task | None = None
@@ -128,6 +126,10 @@ class Hotpot:
                 "max_seconds": self.settings.tarpit_max_seconds,
                 "escalated_max_seconds": self.settings.tarpit_escalated_max_seconds,
             },
+            "client_ip": {
+                "mode": self.settings.client_ip_mode,
+                "trusted_proxy_cidrs": self.settings.trusted_proxy_cidrs,
+            },
             "allowlist": {"cidrs": self.settings.allow_cidrs},
             "retention": {
                 "events_days": self.settings.retention_days,
@@ -188,8 +190,8 @@ class Hotpot:
         if request.path == "/_hotpot/api/attacker":
             return await self.attacker_api(request)
 
-        client_ip = peer_ip(request, self.settings.trust_forwarded_for)
-        if self.allowlist.contains(client_ip):
+        identity = self.client_identity(request)
+        if self.allowlist.contains(identity.client_ip):
             self.stats["allowlisted"] += 1
             if request.headers.get("Upgrade", "").lower() == "websocket":
                 return await self.proxy_websocket(request)
@@ -204,7 +206,8 @@ class Hotpot:
         return await self.proxy_http(request)
 
     async def deception(self, request: web.Request, rule: Rule) -> web.StreamResponse:
-        ip = peer_ip(request, self.settings.trust_forwarded_for)
+        identity = self.client_identity(request)
+        ip = identity.client_ip
         user_agent = request.headers.get("User-Agent", "")
         classification = classify(user_agent, rule.category, request.method, request.path_qs)
 
@@ -224,6 +227,9 @@ class Hotpot:
             event = {
                 "event": "deception",
                 "client_ip": ip,
+                "proxy_ip": identity.proxy_ip,
+                "client_ip_source": identity.source,
+                "trusted_proxy": identity.trusted_proxy,
                 "method": request.method,
                 "path": request.path_qs,
                 "host": request.host,
@@ -330,12 +336,16 @@ class Hotpot:
     def upstream_url(self, request: web.Request) -> str:
         return f"{self.settings.upstream}{request.rel_url}"
 
+    def client_identity(self, request: web.Request) -> ClientIdentity:
+        return self.client_ips.resolve(transport_peer_ip(request), request.headers)
+
     def forwarding_headers(self, request: web.Request) -> CIMultiDict:
         headers = clean_headers(request.headers)
-        ip = peer_ip(request, self.settings.trust_forwarded_for)
-        prior = request.headers.get("X-Forwarded-For") if self.settings.trust_forwarded_for else None
-        headers["X-Forwarded-For"] = f"{prior}, {ip}" if prior else ip
-        headers["X-Real-IP"] = ip
+        identity = self.client_identity(request)
+        # Normalize these headers at Hotpot's trust boundary instead of forwarding
+        # an attacker-controlled chain from outside the trusted proxy path.
+        headers["X-Forwarded-For"] = identity.client_ip
+        headers["X-Real-IP"] = identity.client_ip
         headers["X-Forwarded-Proto"] = request.headers.get("X-Forwarded-Proto", request.scheme)
         headers["X-Forwarded-Host"] = request.host
         return headers

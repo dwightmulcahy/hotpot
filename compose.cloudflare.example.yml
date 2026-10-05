@@ -1,0 +1,72 @@
+services:
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: cloudflared
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    networks:
+      tunnel_frontend:
+        ipv4_address: 172.30.0.10
+
+  hotpot:
+    image: ${HOTPOT_IMAGE:-yourdockerhubuser/hotpot:latest}
+    container_name: hotpot
+    restart: unless-stopped
+    depends_on:
+      - myapp
+    environment:
+      HOTPOT_UPSTREAM: http://myapp:3000
+      HOTPOT_PROFILES: wordpress,secrets,git,php,generic
+
+      # Cloudflare Tunnel client-IP handling.
+      # CF-Connecting-IP is trusted only when the TCP peer is in this CIDR.
+      HOTPOT_CLIENT_IP_MODE: cloudflare
+      HOTPOT_TRUSTED_PROXY_CIDRS: 172.30.0.0/24
+
+      HOTPOT_TARPIT_ENABLED: "true"
+      HOTPOT_TARPIT_MAX_CONCURRENT: "10"
+      HOTPOT_TARPIT_INITIAL_DELAY: "1.0"
+      HOTPOT_TARPIT_CHUNK_DELAY: "2.0"
+      HOTPOT_TARPIT_MAX_SECONDS: "20"
+      HOTPOT_TARPIT_ESCALATED_MAX_SECONDS: "60"
+
+      HOTPOT_ALLOW_CIDRS: ${HOTPOT_ALLOW_CIDRS:-}
+      HOTPOT_RETENTION_DAYS: "30"
+      HOTPOT_ATTACKER_RETENTION_DAYS: "90"
+      HOTPOT_HOUSEKEEPING_INTERVAL_SECONDS: "21600"
+      HOTPOT_NOTIFY_MIN_LEVEL: "3"
+      HOTPOT_NOTIFY_COOLDOWN_SECONDS: "3600"
+      HOTPOT_NOTIFY_WEBHOOK_URL: ${HOTPOT_NOTIFY_WEBHOOK_URL:-}
+      HOTPOT_NOTIFY_WEBHOOK_BEARER: ${HOTPOT_NOTIFY_WEBHOOK_BEARER:-}
+      HOTPOT_ADMIN_TOKEN: ${HOTPOT_ADMIN_TOKEN:-}
+    volumes:
+      - ./data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      - tunnel_frontend
+      - app_backend
+
+  myapp:
+    image: your/existing-image:latest
+    expose:
+      - "3000"
+    networks:
+      - app_backend
+
+networks:
+  # A fixed subnet makes the trusted proxy boundary deterministic. Hotpot itself
+  # publishes no host port; cloudflared reaches it by Docker DNS at http://hotpot:8080.
+  tunnel_frontend:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+  app_backend:
+    driver: bridge
+    internal: true

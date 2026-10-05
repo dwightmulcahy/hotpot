@@ -26,7 +26,8 @@ class Settings:
     enabled_profiles: tuple[str, ...]
     max_request_body: int
     upstream_timeout: float
-    trust_forwarded_for: bool
+    client_ip_mode: str
+    trusted_proxy_cidrs: tuple[str, ...]
     tarpit_enabled: bool
     tarpit_max_concurrent: int
     tarpit_initial_delay: float
@@ -65,7 +66,8 @@ class Settings:
             enabled_profiles=profiles,
             max_request_body=int(os.getenv("HOTPOT_MAX_REQUEST_BODY", str(8 * 1024 * 1024))),
             upstream_timeout=float(os.getenv("HOTPOT_UPSTREAM_TIMEOUT", "60")),
-            trust_forwarded_for=env_bool("HOTPOT_TRUST_FORWARDED_FOR", False),
+            client_ip_mode=os.getenv("HOTPOT_CLIENT_IP_MODE", "direct"),
+            trusted_proxy_cidrs=env_csv("HOTPOT_TRUSTED_PROXY_CIDRS"),
             tarpit_enabled=env_bool("HOTPOT_TARPIT_ENABLED", True),
             tarpit_max_concurrent=int(os.getenv("HOTPOT_TARPIT_MAX_CONCURRENT", "10")),
             tarpit_initial_delay=float(os.getenv("HOTPOT_TARPIT_INITIAL_DELAY", "1.0")),

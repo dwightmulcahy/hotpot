@@ -228,16 +228,32 @@ class IntelligenceStore:
             ).fetchone()
             events = conn.execute(
                 """
-                SELECT ts, method, path, profile, rule, category, action, scanner,
-                       scanner_family, fingerprint, severity, escalation_level
+                SELECT ts, ip, method, path, profile, rule, category, action, scanner,
+                       scanner_family, fingerprint, severity, escalation_level, details_json
                 FROM events WHERE ip = ? ORDER BY id DESC LIMIT ?
                 """,
                 (ip, max(1, min(limit, 500))),
             ).fetchall()
         return {
             "attacker": dict(attacker) if attacker is not None else None,
-            "events": [dict(row) for row in events],
+            "events": [self._expand_event_row(row) for row in events],
         }
+
+    @staticmethod
+    def _expand_event_row(row: sqlite3.Row) -> dict[str, Any]:
+        event = dict(row)
+        details_raw = event.pop("details_json", None)
+        if details_raw:
+            try:
+                details = json.loads(details_raw)
+            except (TypeError, json.JSONDecodeError):
+                details = {}
+            if isinstance(details, dict):
+                event.update(details)
+        # Public API consistently exposes the source identity as client_ip.
+        if "ip" in event:
+            event["client_ip"] = event.pop("ip")
+        return event
 
     async def dashboard_snapshot(self, limit: int = 25) -> dict[str, Any]:
         async with self._lock:
@@ -266,7 +282,7 @@ class IntelligenceStore:
             recent = conn.execute(
                 """
                 SELECT ts, ip, method, path, category, action, scanner, fingerprint,
-                       severity, escalation_level
+                       severity, escalation_level, details_json
                 FROM events ORDER BY id DESC LIMIT ?
                 """,
                 (limit,),
@@ -287,5 +303,6 @@ class IntelligenceStore:
             "events": totals["events"], "unique_ips": totals["unique_ips"],
             "top_paths": rows(top_paths), "top_categories": rows(top_categories),
             "top_scanners": rows(top_scanners), "top_offenders": rows(offenders),
-            "top_fingerprints": rows(fingerprints), "recent": rows(recent),
+            "top_fingerprints": rows(fingerprints),
+            "recent": [self._expand_event_row(row) for row in recent],
         }

@@ -12,7 +12,7 @@ def settings_for(webhook_url: str) -> Settings:
     return Settings(
         bind="127.0.0.1", port=8080, upstream="http://example.invalid", data_dir=Path("/tmp"),
         profiles_dir=Path("profiles"), enabled_profiles=(), max_request_body=1024,
-        upstream_timeout=10, trust_forwarded_for=False, tarpit_enabled=True,
+        upstream_timeout=10, client_ip_mode="direct", trusted_proxy_cidrs=(), tarpit_enabled=True,
         tarpit_max_concurrent=1, tarpit_initial_delay=0, tarpit_chunk_delay=0,
         tarpit_max_seconds=1, tarpit_escalated_max_seconds=2, admin_token="x",
         allow_cidrs=(), retention_days=30, attacker_retention_days=90,
