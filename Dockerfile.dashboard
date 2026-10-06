@@ -1,0 +1,14 @@
+FROM python:3.12-alpine
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+RUN addgroup -S hotpot && adduser -S -G hotpot -u 10001 hotpot
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY dashboard ./dashboard
+RUN chown -R hotpot:hotpot /app
+USER 10001:10001
+EXPOSE 19090
+CMD ["python", "-m", "dashboard.app"]
