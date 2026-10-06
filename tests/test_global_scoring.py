@@ -90,7 +90,7 @@ class GlobalCentralStoreTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(offender["apps"]), 4)
             self.assertEqual(snapshot["summary"]["level3_plus"], 1)
             self.assertEqual(snapshot["summary"]["global_level4"], 1)
-            self.assertEqual(snapshot["global_scoring"]["version"], 1)
+            self.assertEqual(snapshot["global_scoring"]["version"], 2)
 
             detail = await store.attacker_snapshot("203.0.113.10")
             self.assertIsNotNone(detail)
