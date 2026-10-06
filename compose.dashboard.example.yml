@@ -1,0 +1,23 @@
+services:
+  hotpot-dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.dashboard
+    image: dwightmulcahy/hotpot-dashboard:latest
+    container_name: hotpot-dashboard
+    restart: unless-stopped
+    network_mode: host
+
+    env_file:
+      - /share/Data/config/cloudflared/dashboard.env
+
+    read_only: true
+
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+
+    security_opt:
+      - no-new-privileges:true
+
+    cap_drop:
+      - ALL
