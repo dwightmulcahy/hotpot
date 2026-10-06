@@ -21,8 +21,6 @@ class Settings:
     bind: str
     port: int
     upstream: str
-    instance_id: str
-    instance_name: str
     data_dir: Path
     profiles_dir: Path
     enabled_profiles: tuple[str, ...]
@@ -52,6 +50,8 @@ class Settings:
     smtp_password: str | None
     smtp_from: str | None
     smtp_to: tuple[str, ...]
+    instance_id: str = "hotpot"
+    instance_name: str = "hotpot"
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -65,8 +65,6 @@ class Settings:
             bind=os.getenv("HOTPOT_BIND", "0.0.0.0"),
             port=int(os.getenv("HOTPOT_PORT", "8080")),
             upstream=upstream,
-            instance_id=instance_id,
-            instance_name=instance_name,
             data_dir=Path(os.getenv("HOTPOT_DATA_DIR", "/data")),
             profiles_dir=Path(os.getenv("HOTPOT_PROFILES_DIR", "/app/profiles")),
             enabled_profiles=profiles,
@@ -96,4 +94,6 @@ class Settings:
             smtp_password=os.getenv("HOTPOT_SMTP_PASSWORD") or None,
             smtp_from=os.getenv("HOTPOT_SMTP_FROM") or None,
             smtp_to=env_csv("HOTPOT_SMTP_TO"),
+            instance_id=instance_id,
+            instance_name=instance_name,
         )
