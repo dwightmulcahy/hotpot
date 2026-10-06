@@ -8,7 +8,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from hotpot.app import HOTPOT_APP_KEY
 from hotpot.config import Settings
-from hotpot.production import build_app
+from hotpot.gateway import build_app
 
 
 class ProductionHardeningTests(unittest.IsolatedAsyncioTestCase):
