@@ -111,56 +111,97 @@ class IntelligenceStore:
 
     async def record(self, event: dict[str, Any], *, score: int,
                      escalation_level: int) -> None:
-        async with self._lock:
-            await asyncio.to_thread(self._record_sync, event, score, escalation_level)
+        await self.record_many([(event, score, escalation_level)])
 
-    def _record_sync(self, event: dict[str, Any], score: int,
-                     escalation_level: int) -> None:
+    async def record_many(self, items: list[tuple[dict[str, Any], int, int]]) -> None:
+        if not items:
+            return
+        async with self._lock:
+            await asyncio.to_thread(self._record_many_sync, items)
+
+    def _record_many_sync(self, items: list[tuple[dict[str, Any], int, int]]) -> None:
+        with self._connection() as conn:
+            for event, score, escalation_level in items:
+                self._record_into_connection(conn, event, score, escalation_level)
+
+    @staticmethod
+    def _record_into_connection(conn: sqlite3.Connection, event: dict[str, Any],
+                                score: int, escalation_level: int) -> None:
         ts = event.get("timestamp") or datetime.now(timezone.utc).isoformat()
         ip = str(event["client_ip"])
-        with self._connection() as conn:
-            conn.execute(
-                """
-                INSERT INTO attackers (
-                    ip, first_seen, last_seen, hits, score, escalation_level,
-                    last_category, last_scanner, last_fingerprint
-                ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?)
-                ON CONFLICT(ip) DO UPDATE SET
-                    last_seen = excluded.last_seen,
-                    hits = attackers.hits + 1,
-                    score = excluded.score,
-                    escalation_level = MAX(attackers.escalation_level, excluded.escalation_level),
-                    last_category = excluded.last_category,
-                    last_scanner = excluded.last_scanner,
-                    last_fingerprint = excluded.last_fingerprint
-                """,
-                (ip, ts, ts, score, escalation_level, event.get("category"),
-                 event.get("scanner"), event.get("fingerprint")),
-            )
-            details = {
-                k: v for k, v in event.items()
-                if k not in {
-                    "timestamp", "client_ip", "method", "path", "profile", "rule",
-                    "category", "action", "scanner", "scanner_family", "fingerprint",
-                    "severity", "escalation_level"
-                }
+        conn.execute(
+            """
+            INSERT INTO attackers (
+                ip, first_seen, last_seen, hits, score, escalation_level,
+                last_category, last_scanner, last_fingerprint
+            ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?)
+            ON CONFLICT(ip) DO UPDATE SET
+                last_seen = excluded.last_seen,
+                hits = attackers.hits + 1,
+                score = excluded.score,
+                escalation_level = MAX(attackers.escalation_level, excluded.escalation_level),
+                last_category = excluded.last_category,
+                last_scanner = excluded.last_scanner,
+                last_fingerprint = excluded.last_fingerprint
+            """,
+            (ip, ts, ts, score, escalation_level, event.get("category"),
+             event.get("scanner"), event.get("fingerprint")),
+        )
+        details = {
+            k: v for k, v in event.items()
+            if k not in {
+                "timestamp", "client_ip", "method", "path", "profile", "rule",
+                "category", "action", "scanner", "scanner_family", "fingerprint",
+                "severity", "escalation_level"
             }
-            conn.execute(
+        }
+        conn.execute(
+            """
+            INSERT INTO events (
+                ts, ip, method, path, profile, rule, category, action,
+                scanner, scanner_family, fingerprint, severity,
+                escalation_level, details_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                ts, ip, event.get("method", ""), event.get("path", ""),
+                event.get("profile"), event.get("rule"), event.get("category"),
+                event.get("action"), event.get("scanner"), event.get("scanner_family"),
+                event.get("fingerprint"), int(event.get("severity", 1)),
+                escalation_level, json.dumps(details, separators=(",", ":")),
+            ),
+        )
+
+    async def events_since(self, after_id: int = 0, limit: int = 500) -> dict[str, Any]:
+        async with self._lock:
+            return await asyncio.to_thread(self._events_since_sync, after_id, limit)
+
+    def _events_since_sync(self, after_id: int, limit: int) -> dict[str, Any]:
+        bounded = max(1, min(int(limit), 1000))
+        after = max(0, int(after_id))
+        with self._connection() as conn:
+            rows = conn.execute(
                 """
-                INSERT INTO events (
-                    ts, ip, method, path, profile, rule, category, action,
-                    scanner, scanner_family, fingerprint, severity,
-                    escalation_level, details_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                SELECT id, ts, ip, method, path, profile, rule, category, action,
+                       scanner, scanner_family, fingerprint, severity,
+                       escalation_level, details_json
+                FROM events WHERE id > ? ORDER BY id ASC LIMIT ?
                 """,
-                (
-                    ts, ip, event.get("method", ""), event.get("path", ""),
-                    event.get("profile"), event.get("rule"), event.get("category"),
-                    event.get("action"), event.get("scanner"), event.get("scanner_family"),
-                    event.get("fingerprint"), int(event.get("severity", 1)),
-                    escalation_level, json.dumps(details, separators=(",", ":")),
-                ),
-            )
+                (after, bounded + 1),
+            ).fetchall()
+        has_more = len(rows) > bounded
+        selected = rows[:bounded]
+        events: list[dict[str, Any]] = []
+        for row in selected:
+            event = self._expand_event_row(row)
+            event["event_id"] = int(event.pop("id"))
+            events.append(event)
+        next_cursor = events[-1]["event_id"] if events else after
+        return {
+            "events": events,
+            "next_cursor": next_cursor,
+            "has_more": has_more,
+        }
 
     async def claim_notification(self, ip: str, level: int, cooldown_seconds: int) -> bool:
         async with self._lock:
@@ -176,7 +217,6 @@ class IntelligenceStore:
             if row is not None:
                 last = datetime.fromisoformat(row["last_notified_at"])
                 age = (now - last).total_seconds()
-                # Always alert on a new higher escalation level; otherwise respect cooldown.
                 if level <= row["last_notified_level"] and age < cooldown_seconds:
                     return False
             conn.execute(
@@ -209,7 +249,6 @@ class IntelligenceStore:
             conn.execute("DELETE FROM notification_state WHERE ip NOT IN (SELECT ip FROM attackers)")
             after_events = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
             after_attackers = conn.execute("SELECT COUNT(*) FROM attackers").fetchone()[0]
-        # Checkpoint only after the cleanup transaction has committed.
         with self._connection() as conn:
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         return {
@@ -250,7 +289,6 @@ class IntelligenceStore:
                 details = {}
             if isinstance(details, dict):
                 event.update(details)
-        # Public API consistently exposes the source identity as client_ip.
         if "ip" in event:
             event["client_ip"] = event.pop("ip")
         return event
