@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - develop
+      - feature/dashboard
   pull_request:
 
 permissions:
@@ -28,7 +29,7 @@ jobs:
         run: python -m pip install --upgrade pip -r requirements.txt
 
       - name: Compile Python sources
-        run: python -m compileall -q hotpot tests
+        run: python -m compileall -q hotpot dashboard tests
 
       - name: Run tests
         run: python -m unittest discover -s tests -v
@@ -43,11 +44,21 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Build image without pushing
+      - name: Build Hotpot image without pushing
         uses: docker/build-push-action@v7
         with:
           context: .
           push: false
           tags: hotpot:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build dashboard image without pushing
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile.dashboard
+          push: false
+          tags: hotpot-dashboard:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
