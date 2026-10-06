@@ -2,13 +2,18 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from .global_scoring import GlobalCentralStore, SCORING_VERSION, score_attacker
+from .global_scoring import (
+    CLOUDFLARE_WORKER_SHARED_IP,
+    LEGACY_WORKER_KEY,
+    GlobalCentralStore,
+    SCORING_VERSION,
+    score_attacker,
+)
 
 
 class DurableGlobalStore(GlobalCentralStore):
@@ -53,7 +58,10 @@ class DurableGlobalStore(GlobalCentralStore):
                     severity_score INTEGER NOT NULL DEFAULT 0,
                     max_severity INTEGER NOT NULL DEFAULT 0,
                     max_local_level INTEGER NOT NULL DEFAULT 1,
-                    max_global_level INTEGER NOT NULL DEFAULT 1
+                    max_global_level INTEGER NOT NULL DEFAULT 1,
+                    last_client_ip TEXT,
+                    source_type TEXT NOT NULL DEFAULT 'ip',
+                    worker_zone TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS lifetime_apps (
@@ -93,6 +101,52 @@ class DurableGlobalStore(GlobalCentralStore):
                     ON events(lifetime_accounted, event_id);
                 """
             )
+
+            lifetime_columns = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(lifetime_attackers)").fetchall()
+            }
+            if "last_client_ip" not in lifetime_columns:
+                conn.execute("ALTER TABLE lifetime_attackers ADD COLUMN last_client_ip TEXT")
+            if "source_type" not in lifetime_columns:
+                conn.execute(
+                    "ALTER TABLE lifetime_attackers ADD COLUMN source_type TEXT NOT NULL DEFAULT 'ip'"
+                )
+            if "worker_zone" not in lifetime_columns:
+                conn.execute("ALTER TABLE lifetime_attackers ADD COLUMN worker_zone TEXT")
+
+            # Relabel the pre-identity lifetime bucket for Cloudflare's documented
+            # cross-zone Worker shared IPv6. Its historical requests cannot be split
+            # by zone retroactively, but they should no longer look like one end user.
+            legacy_exists = conn.execute(
+                "SELECT 1 FROM lifetime_attackers WHERE ip = ?", (LEGACY_WORKER_KEY,)
+            ).fetchone()
+            shared_exists = conn.execute(
+                "SELECT 1 FROM lifetime_attackers WHERE ip = ?",
+                (CLOUDFLARE_WORKER_SHARED_IP,),
+            ).fetchone()
+            if shared_exists is not None and legacy_exists is None:
+                conn.execute(
+                    """
+                    UPDATE lifetime_attackers
+                    SET ip = ?, last_client_ip = ?, source_type = 'cloudflare-worker'
+                    WHERE ip = ?
+                    """,
+                    (
+                        LEGACY_WORKER_KEY,
+                        CLOUDFLARE_WORKER_SHARED_IP,
+                        CLOUDFLARE_WORKER_SHARED_IP,
+                    ),
+                )
+                conn.execute(
+                    "UPDATE lifetime_apps SET ip = ? WHERE ip = ?",
+                    (LEGACY_WORKER_KEY, CLOUDFLARE_WORKER_SHARED_IP),
+                )
+                conn.execute(
+                    "UPDATE lifetime_categories SET ip = ? WHERE ip = ?",
+                    (LEGACY_WORKER_KEY, CLOUDFLARE_WORKER_SHARED_IP),
+                )
+
             self._account_unprocessed_conn(conn)
             conn.commit()
         finally:
@@ -111,7 +165,8 @@ class DurableGlobalStore(GlobalCentralStore):
     def _account_unprocessed_conn(self, conn: sqlite3.Connection) -> int:
         rows = conn.execute(
             """
-            SELECT instance_id, instance_name, event_id, ts, client_ip, category,
+            SELECT instance_id, instance_name, event_id, ts, client_ip,
+                   attacker_key, source_type, worker_zone, category,
                    severity, escalation_level, suppressed_before
             FROM events
             WHERE lifetime_accounted = 0
@@ -123,8 +178,9 @@ class DurableGlobalStore(GlobalCentralStore):
 
         affected: set[str] = set()
         for row in rows:
-            ip = str(row["client_ip"] or "").strip()
-            if not ip or ip == "unknown":
+            client_ip = str(row["client_ip"] or "").strip()
+            identity_key = str(row["attacker_key"] or client_ip).strip()
+            if not identity_key or identity_key == "unknown":
                 conn.execute(
                     "UPDATE events SET lifetime_accounted = 1 WHERE instance_id = ? AND event_id = ?",
                     (row["instance_id"], row["event_id"]),
@@ -136,14 +192,17 @@ class DurableGlobalStore(GlobalCentralStore):
             observed_hits = 1 + max(0, int(row["suppressed_before"] or 0))
             severity = max(0, int(row["severity"] or 0))
             local_level = max(1, int(row["escalation_level"] or 1))
-            affected.add(ip)
+            source_type = str(row["source_type"] or "ip")
+            worker_zone = str(row["worker_zone"]) if row["worker_zone"] else None
+            affected.add(identity_key)
 
             conn.execute(
                 """
                 INSERT INTO lifetime_attackers(
                     ip, first_seen, last_seen, lifetime_hits, persisted_hits,
-                    severity_score, max_severity, max_local_level, max_global_level
-                ) VALUES (?, ?, ?, ?, 1, ?, ?, ?, 1)
+                    severity_score, max_severity, max_local_level, max_global_level,
+                    last_client_ip, source_type, worker_zone
+                ) VALUES (?, ?, ?, ?, 1, ?, ?, ?, 1, ?, ?, ?)
                 ON CONFLICT(ip) DO UPDATE SET
                     first_seen = MIN(lifetime_attackers.first_seen, excluded.first_seen),
                     last_seen = MAX(lifetime_attackers.last_seen, excluded.last_seen),
@@ -151,9 +210,23 @@ class DurableGlobalStore(GlobalCentralStore):
                     persisted_hits = lifetime_attackers.persisted_hits + 1,
                     severity_score = lifetime_attackers.severity_score + excluded.severity_score,
                     max_severity = MAX(lifetime_attackers.max_severity, excluded.max_severity),
-                    max_local_level = MAX(lifetime_attackers.max_local_level, excluded.max_local_level)
+                    max_local_level = MAX(lifetime_attackers.max_local_level, excluded.max_local_level),
+                    last_client_ip = excluded.last_client_ip,
+                    source_type = excluded.source_type,
+                    worker_zone = COALESCE(excluded.worker_zone, lifetime_attackers.worker_zone)
                 """,
-                (ip, ts, ts, observed_hits, severity, severity, local_level),
+                (
+                    identity_key,
+                    ts,
+                    ts,
+                    observed_hits,
+                    severity,
+                    severity,
+                    local_level,
+                    client_ip or None,
+                    source_type,
+                    worker_zone,
+                ),
             )
             conn.execute(
                 """
@@ -169,7 +242,7 @@ class DurableGlobalStore(GlobalCentralStore):
                     persisted_hits = lifetime_apps.persisted_hits + 1
                 """,
                 (
-                    ip,
+                    identity_key,
                     row["instance_id"],
                     row["instance_name"],
                     ts,
@@ -190,23 +263,23 @@ class DurableGlobalStore(GlobalCentralStore):
                     persisted_hits = lifetime_categories.persisted_hits + 1,
                     max_severity = MAX(lifetime_categories.max_severity, excluded.max_severity)
                 """,
-                (ip, category, ts, ts, observed_hits, severity),
+                (identity_key, category, ts, ts, observed_hits, severity),
             )
             conn.execute(
                 "UPDATE events SET lifetime_accounted = 1 WHERE instance_id = ? AND event_id = ?",
                 (row["instance_id"], row["event_id"]),
             )
 
-        for ip in affected:
+        for identity_key in affected:
             row = conn.execute(
                 "SELECT lifetime_hits, severity_score FROM lifetime_attackers WHERE ip = ?",
-                (ip,),
+                (identity_key,),
             ).fetchone()
             apps = conn.execute(
-                "SELECT COUNT(*) FROM lifetime_apps WHERE ip = ?", (ip,)
+                "SELECT COUNT(*) FROM lifetime_apps WHERE ip = ?", (identity_key,)
             ).fetchone()[0]
             categories = conn.execute(
-                "SELECT COUNT(*) FROM lifetime_categories WHERE ip = ?", (ip,)
+                "SELECT COUNT(*) FROM lifetime_categories WHERE ip = ?", (identity_key,)
             ).fetchone()[0]
             score = score_attacker(
                 severity_score=int(row["severity_score"] or 0),
@@ -216,7 +289,7 @@ class DurableGlobalStore(GlobalCentralStore):
             )
             conn.execute(
                 "UPDATE lifetime_attackers SET max_global_level = MAX(max_global_level, ?) WHERE ip = ?",
-                (score.level, ip),
+                (score.level, identity_key),
             )
         return len(rows)
 
@@ -355,10 +428,10 @@ class DurableGlobalStore(GlobalCentralStore):
             conn.close()
 
     def _lifetime_attacker_conn(
-        self, conn: sqlite3.Connection, ip: str
+        self, conn: sqlite3.Connection, identity_key: str
     ) -> dict[str, Any] | None:
         row = conn.execute(
-            "SELECT * FROM lifetime_attackers WHERE ip = ?", (ip,)
+            "SELECT * FROM lifetime_attackers WHERE ip = ?", (identity_key,)
         ).fetchone()
         if row is None:
             return None
@@ -369,7 +442,7 @@ class DurableGlobalStore(GlobalCentralStore):
             FROM lifetime_apps WHERE ip = ?
             ORDER BY lifetime_hits DESC, instance_name ASC
             """,
-            (ip,),
+            (identity_key,),
         ).fetchall()
         categories = conn.execute(
             """
@@ -378,9 +451,11 @@ class DurableGlobalStore(GlobalCentralStore):
             FROM lifetime_categories WHERE ip = ?
             ORDER BY lifetime_hits DESC, category ASC
             """,
-            (ip,),
+            (identity_key,),
         ).fetchall()
         result = dict(row)
+        result["identity_key"] = result["ip"]
+        result["client_ip"] = result.get("last_client_ip")
         result["app_count"] = len(apps)
         result["category_count"] = len(categories)
         score = score_attacker(
@@ -391,7 +466,9 @@ class DurableGlobalStore(GlobalCentralStore):
         )
         result["global_score"] = score.score
         result["global_level"] = score.level
-        result["max_global_level"] = max(int(result["max_global_level"] or 1), score.level)
+        result["max_global_level"] = max(
+            int(result["max_global_level"] or 1), score.level
+        )
         result["apps"] = [dict(value) for value in apps]
         result["categories"] = [dict(value) for value in categories]
         return result
@@ -399,7 +476,7 @@ class DurableGlobalStore(GlobalCentralStore):
     def _top_lifetime_conn(
         self, conn: sqlite3.Connection, limit: int = 20
     ) -> list[dict[str, Any]]:
-        ips = conn.execute(
+        keys = conn.execute(
             """
             SELECT ip FROM lifetime_attackers
             ORDER BY severity_score DESC, lifetime_hits DESC, last_seen DESC
@@ -407,7 +484,9 @@ class DurableGlobalStore(GlobalCentralStore):
             """,
             (max(limit * 4, limit),),
         ).fetchall()
-        values = [self._lifetime_attacker_conn(conn, str(row["ip"])) for row in ips]
+        values = [
+            self._lifetime_attacker_conn(conn, str(row["ip"])) for row in keys
+        ]
         result = [value for value in values if value is not None]
         result.sort(
             key=lambda item: (
@@ -471,7 +550,7 @@ class DurableGlobalStore(GlobalCentralStore):
         try:
             for attacker in snapshot.get("top_offenders", []):
                 attacker["lifetime"] = self._lifetime_attacker_conn(
-                    conn, str(attacker.get("ip", ""))
+                    conn, str(attacker.get("identity_key") or attacker.get("ip", ""))
                 )
             snapshot["top_lifetime_offenders"] = self._top_lifetime_conn(conn, 20)
         finally:
@@ -487,17 +566,21 @@ class DurableGlobalStore(GlobalCentralStore):
         snapshot["summary"]["source_resets"] = database["source_resets"]
         return snapshot
 
-    def _attacker_snapshot_sync(self, ip: str) -> dict[str, Any] | None:
-        current = super()._attacker_snapshot_sync(ip)
+    def _attacker_snapshot_sync(self, identity_key: str) -> dict[str, Any] | None:
+        current = super()._attacker_snapshot_sync(identity_key)
         conn = self._connect()
         try:
-            lifetime = self._lifetime_attacker_conn(conn, ip)
+            lifetime = self._lifetime_attacker_conn(conn, identity_key)
         finally:
             conn.close()
         if current is None and lifetime is None:
             return None
         result = current or {
-            "ip": ip,
+            "identity_key": identity_key,
+            "ip": identity_key,
+            "client_ip": lifetime.get("client_ip") if lifetime else None,
+            "source_type": lifetime.get("source_type", "ip") if lifetime else "ip",
+            "worker_zone": lifetime.get("worker_zone") if lifetime else None,
             "persisted_hits": 0,
             "hits": 0,
             "severity_score": 0,
