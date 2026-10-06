@@ -2,14 +2,24 @@ from __future__ import annotations
 
 import asyncio
 import os
+from pathlib import Path
 from typing import Any
 
 from aiohttp import web
 
 from . import runtime as core
+from .global_scoring import GlobalCentralStore
 
 
 class ProductionDashboard(core.Dashboard):
+    def __init__(self) -> None:
+        super().__init__()
+        # Replace the base central store with the scoring-aware store. It reuses the
+        # same SQLite file and performs an additive schema migration in place.
+        self.store = GlobalCentralStore(
+            Path(os.getenv("HOTPOT_DASHBOARD_DATA_DIR", "/data"))
+        )
+
     async def collect_status(self, instance) -> dict[str, Any]:
         row = await super().collect_status(instance)
         if row.get("error"):
@@ -52,6 +62,16 @@ class ProductionDashboard(core.Dashboard):
         async with self.cache_lock:
             self.cache = snapshot
 
+    async def api_attacker(self, request: web.Request) -> web.Response:
+        self.require_auth(request)
+        ip = request.query.get("ip", "").strip()
+        if not ip:
+            raise web.HTTPBadRequest(text="ip query parameter is required")
+        result = await self.store.attacker_snapshot(ip)
+        if result is None:
+            raise web.HTTPNotFound(text="attacker not found")
+        return web.json_response(result, headers={"Cache-Control": "no-store"})
+
     async def index(self, request: web.Request) -> web.Response:
         self.require_auth(request)
         return web.Response(
@@ -72,15 +92,19 @@ class ProductionDashboard(core.Dashboard):
 PRODUCTION_HTML = core.HTML
 PRODUCTION_HTML = PRODUCTION_HTML.replace(
     ".cards{display:grid;grid-template-columns:repeat(5,1fr);",
-    ".cards{display:grid;grid-template-columns:repeat(6,1fr);",
+    ".cards{display:grid;grid-template-columns:repeat(7,1fr);",
 )
 PRODUCTION_HTML = PRODUCTION_HTML.replace(
     "['Active tarpits',s.active_tarpits]",
-    "['Active tarpits',s.active_tarpits],['Suppressed',s.suppressed_events||0]",
+    "['Active tarpits',s.active_tarpits],['Suppressed',s.suppressed_events||0],['Global L3+',s.level3_plus||0]",
 )
 PRODUCTION_HTML = PRODUCTION_HTML.replace(
     "${fmt(a.proxied)} proxied · ${fmt(a.telemetry_errors)} telemetry errors",
     "${fmt(a.proxied)} proxied · ${fmt(a.events_suppressed||0)} suppressed · ${fmt(a.telemetry_errors)} telemetry errors</div><div class=\"muted\">${esc(a.version||'unknown')} · ${esc((a.git_sha||'unknown').slice(0,7))}",
+)
+PRODUCTION_HTML = PRODUCTION_HTML.replace(
+    "<strong>${esc(o.ip)}</strong> · score ${fmt(o.score)} · ${fmt(o.hits)} hits · ${o.app_count} apps<div class=\"muted\">${esc(o.apps.join(', '))}</div>",
+    "<strong>${esc(o.ip)}</strong> · <strong>Global L${fmt(o.global_level||o.level)}</strong> · score ${fmt(o.global_score||o.score)} · ${fmt(o.hits)} hits<div class=\"muted\">${fmt(o.app_count)} apps · ${fmt(o.category_count)} categories · ${esc((o.apps||[]).join(', '))}</div>",
 )
 
 
@@ -93,6 +117,7 @@ def build_app() -> web.Application:
     app.router.add_get("/", dashboard.index)
     app.router.add_get("/health", dashboard.health)
     app.router.add_get("/api/overview", dashboard.api_overview)
+    app.router.add_get("/api/attacker", dashboard.api_attacker)
     return app
 
 
