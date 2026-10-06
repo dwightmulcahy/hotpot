@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ipaddress
 import os
+from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -15,7 +16,7 @@ except ImportError:  # pragma: no cover
 
 
 class GeoIPEnricher:
-    """Optional local MaxMind MMDB enrichment. No external API calls are made."""
+    """Optional local MaxMind MMDB enrichment with automatic file reloads."""
 
     def __init__(self, *, asn_db=None, country_db=None, city_db=None) -> None:
         self.asn_path = self._path(asn_db if asn_db is not None else os.getenv("HOTPOT_GEOIP_ASN_DB", ""))
@@ -23,17 +24,40 @@ class GeoIPEnricher:
         self.city_path = self._path(city_db if city_db is not None else os.getenv("HOTPOT_GEOIP_CITY_DB", ""))
         self.errors: list[str] = []
         self.asn_reader = self.country_reader = self.city_reader = None
+        self.reload_count = 0
+        self.last_reload_at: str | None = None
+        self._signatures: dict[str, tuple[bool, int, int]] = {}
         if geoip2 is None:
             self.errors.append("geoip2 package is unavailable")
             return
         self.asn_reader = self._open(self.asn_path, "asn")
         self.country_reader = self._open(self.country_path, "country")
         self.city_reader = self._open(self.city_path, "city")
+        self._signatures = self._current_signatures()
+        if self.enabled:
+            self.last_reload_at = datetime.now(timezone.utc).isoformat()
 
     @staticmethod
     def _path(value) -> Path | None:
         raw = str(value or "").strip()
         return Path(raw) if raw else None
+
+    @staticmethod
+    def _signature(path: Path | None) -> tuple[bool, int, int]:
+        if path is None:
+            return (False, 0, 0)
+        try:
+            stat = path.stat()
+            return (path.is_file(), int(stat.st_mtime_ns), int(stat.st_size))
+        except OSError:
+            return (False, 0, 0)
+
+    def _current_signatures(self) -> dict[str, tuple[bool, int, int]]:
+        return {
+            "asn": self._signature(self.asn_path),
+            "country": self._signature(self.country_path),
+            "city": self._signature(self.city_path),
+        }
 
     def _open(self, path: Path | None, label: str):
         if path is None:
@@ -47,17 +71,86 @@ class GeoIPEnricher:
             self.errors.append(f"{label} database failed to open: {type(exc).__name__}")
             return None
 
+    @staticmethod
+    def _close_reader(reader) -> None:
+        if reader is not None:
+            try:
+                reader.close()
+            except Exception:
+                pass
+
     @property
     def enabled(self) -> bool:
         return any((self.asn_reader, self.country_reader, self.city_reader))
 
+    def reload_if_changed(self) -> bool:
+        """Reload MMDB readers when geoipupdate replaces a database on disk.
+
+        The dashboard calls this on its normal refresh interval. New readers are
+        opened before old readers are closed so a bad/incomplete replacement does
+        not discard a working database. Successful reloads also clear the IP lookup
+        cache so subsequent dashboard data uses the new database immediately.
+        """
+
+        if geoip2 is None:
+            return False
+        current = self._current_signatures()
+        if current == self._signatures:
+            return False
+
+        changed = False
+        new_errors: list[str] = []
+        specs = (
+            ("asn", self.asn_path, "asn_reader"),
+            ("country", self.country_path, "country_reader"),
+            ("city", self.city_path, "city_reader"),
+        )
+        for label, path, attr in specs:
+            if current[label] == self._signatures.get(label):
+                continue
+            old_reader = getattr(self, attr)
+            if path is None:
+                self._close_reader(old_reader)
+                setattr(self, attr, None)
+                changed = True
+                continue
+            if not path.is_file():
+                new_errors.append(f"{label} database not found: {path}")
+                continue
+            try:
+                new_reader = geoip2.database.Reader(str(path))  # type: ignore[union-attr]
+            except Exception as exc:
+                new_errors.append(f"{label} database reload failed: {type(exc).__name__}")
+                continue
+            setattr(self, attr, new_reader)
+            self._close_reader(old_reader)
+            changed = True
+
+        # Remember the observed files even if one could not be opened; another file
+        # replacement changes the signature and triggers a new attempt. A failed file
+        # remains represented in status while the previously working reader stays live.
+        self._signatures = current
+        self.errors = new_errors
+        if changed:
+            self.lookup.cache_clear()
+            self.reload_count += 1
+            self.last_reload_at = datetime.now(timezone.utc).isoformat()
+        return changed
+
     def status(self) -> dict[str, Any]:
+        signatures = self._current_signatures()
         return {
             "enabled": self.enabled,
             "source": "MaxMind local MMDB",
             "asn_loaded": self.asn_reader is not None,
             "country_loaded": self.country_reader is not None,
             "city_loaded": self.city_reader is not None,
+            "reload_count": self.reload_count,
+            "last_reload_at": self.last_reload_at,
+            "databases": {
+                name: {"present": sig[0], "mtime_ns": sig[1], "size": sig[2]}
+                for name, sig in signatures.items()
+            },
             "errors": list(self.errors),
         }
 
@@ -102,8 +195,4 @@ class GeoIPEnricher:
 
     def close(self) -> None:
         for reader in (self.asn_reader, self.country_reader, self.city_reader):
-            if reader is not None:
-                try:
-                    reader.close()
-                except Exception:
-                    pass
+            self._close_reader(reader)
