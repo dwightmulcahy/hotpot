@@ -52,6 +52,11 @@ class Settings:
     smtp_to: tuple[str, ...]
     instance_id: str = "hotpot"
     instance_name: str = "hotpot"
+    upstream_health_path: str = "/"
+    upstream_health_interval_seconds: int = 15
+    upstream_health_timeout_seconds: float = 3.0
+    telemetry_queue_size: int = 1000
+    telemetry_batch_size: int = 50
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -61,6 +66,9 @@ class Settings:
         profiles = env_csv("HOTPOT_PROFILES", "wordpress,secrets,git,php,generic")
         instance_id = os.getenv("HOTPOT_INSTANCE_ID", "hotpot").strip() or "hotpot"
         instance_name = os.getenv("HOTPOT_INSTANCE_NAME", instance_id).strip() or instance_id
+        health_path = os.getenv("HOTPOT_UPSTREAM_HEALTH_PATH", "/").strip() or "/"
+        if not health_path.startswith("/"):
+            health_path = "/" + health_path
         return cls(
             bind=os.getenv("HOTPOT_BIND", "0.0.0.0"),
             port=int(os.getenv("HOTPOT_PORT", "8080")),
@@ -96,4 +104,9 @@ class Settings:
             smtp_to=env_csv("HOTPOT_SMTP_TO"),
             instance_id=instance_id,
             instance_name=instance_name,
+            upstream_health_path=health_path,
+            upstream_health_interval_seconds=max(5, int(os.getenv("HOTPOT_UPSTREAM_HEALTH_INTERVAL_SECONDS", "15"))),
+            upstream_health_timeout_seconds=max(0.5, float(os.getenv("HOTPOT_UPSTREAM_HEALTH_TIMEOUT_SECONDS", "3"))),
+            telemetry_queue_size=max(10, int(os.getenv("HOTPOT_TELEMETRY_QUEUE_SIZE", "1000"))),
+            telemetry_batch_size=max(1, min(500, int(os.getenv("HOTPOT_TELEMETRY_BATCH_SIZE", "50")))),
         )
