@@ -76,11 +76,14 @@ class SourceIdentityRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(feed.status, 200)
         feed_payload = await feed.json()
         self.assertTrue(feed_payload["source_id"])
+        self.assertEqual(feed_payload["event_cursor_max"], feed_payload["next_cursor"])
+        self.assertGreater(feed_payload["event_cursor_max"], 0)
 
         status = await self.client.get("/_hotpot/status", headers=headers)
         self.assertEqual(status.status, 200)
         status_payload = await status.json()
         self.assertEqual(status_payload["source_id"], feed_payload["source_id"])
+        self.assertEqual(status_payload["event_cursor_max"], feed_payload["event_cursor_max"])
 
 
 if __name__ == "__main__":
