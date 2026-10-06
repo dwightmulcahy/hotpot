@@ -84,6 +84,7 @@ class ProductionDashboard(core.Dashboard):
                 return
 
             remote_source = str(payload.get("source_id") or "") or None
+            remote_max = int(payload.get("event_cursor_max", 0) or 0)
             if remote_source:
                 if known_source and remote_source != known_source:
                     # Event IDs are only monotonic within one source generation. Drop
@@ -95,6 +96,15 @@ class ProductionDashboard(core.Dashboard):
                     pages = 0
                     continue
                 if not known_source:
+                    # During a rolling upgrade an older dashboard cursor may predate
+                    # source IDs. A high-water mark lower than our saved cursor proves
+                    # the local Hotpot DB was recreated before source tracking existed.
+                    if "event_cursor_max" in payload and cursor > remote_max:
+                        await self.store.reset_source(instance.instance_id, remote_source)
+                        cursor = 0
+                        known_source = remote_source
+                        pages = 0
+                        continue
                     await self.store.register_source(instance.instance_id, remote_source)
                     known_source = remote_source
 
