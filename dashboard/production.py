@@ -49,6 +49,7 @@ class ProductionDashboard(core.Dashboard):
     async def refresh(self) -> None:
         await asyncio.gather(*(self.collect_events(instance) for instance in self.instances))
         apps = await asyncio.gather(*(self.collect_status(instance) for instance in self.instances))
+        self.geoip.reload_if_changed()
         snapshot = await self.store.snapshot(list(apps))
         snapshot["summary"]["suppressed_events"] = sum(int(app.get("events_suppressed", 0) or 0) for app in apps)
         snapshot["top_offenders"] = [self.enrich_attacker(row) for row in snapshot.get("top_offenders", [])]
@@ -64,6 +65,7 @@ class ProductionDashboard(core.Dashboard):
         result = await self.store.attacker_snapshot(ip)
         if result is None:
             raise web.HTTPNotFound(text="attacker not found")
+        self.geoip.reload_if_changed()
         result = self.enrich_attacker(result)
         return web.json_response(result, headers={"Cache-Control": "no-store"})
 
