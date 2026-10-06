@@ -11,6 +11,9 @@ services:
     env_file:
       - /share/Data/config/cloudflared/dashboard.env
 
+    volumes:
+      - /share/Data/config/cloudflared/hotpot-dashboard-data:/data
+
     read_only: true
 
     tmpfs:
