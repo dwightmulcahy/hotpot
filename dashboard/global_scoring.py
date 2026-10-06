@@ -8,7 +8,9 @@ from typing import Any
 from . import runtime as core
 
 
-SCORING_VERSION = 1
+SCORING_VERSION = 2
+CLOUDFLARE_WORKER_SHARED_IP = "2a06:98c0:3600::103"
+LEGACY_WORKER_KEY = "cf-worker:legacy-unknown"
 
 
 @dataclass(frozen=True)
@@ -28,24 +30,13 @@ def score_attacker(
     app_count: int,
     category_count: int,
 ) -> GlobalScore:
-    """Calculate an explainable global attacker score.
-
-    Local Hotpot scores remain authoritative for each protected application. This
-    global score is dashboard-only correlation across all collected applications.
-
-    The persisted severity total is the base score. Volume grows logarithmically so
-    one noisy source cannot dominate the dashboard forever. Cross-application and
-    cross-category behavior receives explicit bonuses because the same source probing
-    several unrelated applications is substantially more suspicious than one isolated
-    probe.
-    """
+    """Calculate an explainable global attacker score."""
 
     severity_score = max(0, int(severity_score))
     hits = max(0, int(hits))
     app_count = max(0, int(app_count))
     category_count = max(0, int(category_count))
 
-    # 0, 4, 8, 12, 16, 20 ... as observed volume doubles, capped at 20.
     volume_bonus = min(20, int(math.log2(max(1, hits))) * 4)
     app_bonus = max(0, app_count - 1) * 8
     category_bonus = max(0, category_count - 1) * 4
@@ -71,7 +62,13 @@ def score_attacker(
 
 
 class GlobalCentralStore(core.CentralStore):
-    """Central intelligence store with exact cross-application scoring."""
+    """Central intelligence store with cross-application actor scoring.
+
+    ``client_ip`` remains the network address observed by Hotpot. ``attacker_key``
+    is the correlation identity. They are normally identical, but cross-zone
+    Cloudflare Worker requests use ``cf-worker:<zone>`` so unrelated Workers do
+    not inherit one shared synthetic IPv6 reputation.
+    """
 
     def _initialize(self) -> None:
         super()._initialize()
@@ -85,9 +82,46 @@ class GlobalCentralStore(core.CentralStore):
                 conn.execute(
                     "ALTER TABLE events ADD COLUMN suppressed_before INTEGER NOT NULL DEFAULT 0"
                 )
+            if "attacker_key" not in columns:
+                conn.execute("ALTER TABLE events ADD COLUMN attacker_key TEXT")
+            if "source_type" not in columns:
+                conn.execute(
+                    "ALTER TABLE events ADD COLUMN source_type TEXT NOT NULL DEFAULT 'ip'"
+                )
+            if "worker_zone" not in columns:
+                conn.execute("ALTER TABLE events ADD COLUMN worker_zone TEXT")
+
+            # Existing rows predate actor-aware identity. Normal rows correlate by
+            # their original IP. The documented Cloudflare cross-zone Worker shared
+            # address is labeled explicitly instead of being presented as an end user.
             conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_dashboard_events_ip_category "
-                "ON events(client_ip, category)"
+                """
+                UPDATE events
+                SET attacker_key = CASE
+                        WHEN client_ip = ? THEN ?
+                        ELSE client_ip
+                    END,
+                    source_type = CASE
+                        WHEN client_ip = ? THEN 'cloudflare-worker'
+                        ELSE COALESCE(NULLIF(source_type, ''), 'ip')
+                    END
+                WHERE attacker_key IS NULL OR attacker_key = ''
+                """,
+                (
+                    CLOUDFLARE_WORKER_SHARED_IP,
+                    LEGACY_WORKER_KEY,
+                    CLOUDFLARE_WORKER_SHARED_IP,
+                ),
+            )
+            conn.executescript(
+                """
+                CREATE INDEX IF NOT EXISTS idx_dashboard_events_ip_category
+                    ON events(client_ip, category);
+                CREATE INDEX IF NOT EXISTS idx_dashboard_events_attacker_key
+                    ON events(attacker_key, ts DESC);
+                CREATE INDEX IF NOT EXISTS idx_dashboard_events_attacker_category
+                    ON events(attacker_key, category);
+                """
             )
             conn.commit()
         finally:
@@ -101,14 +135,21 @@ class GlobalCentralStore(core.CentralStore):
                 event_id = int(event.get("id", 0) or 0)
                 if event_id <= 0:
                     continue
+                client_ip = str(event.get("client_ip", "unknown"))
+                attacker_key = str(event.get("attacker_key") or client_ip)
+                source_type = str(event.get("source_type") or "ip")
+                worker_zone = event.get("worker_zone")
                 conn.execute(
                     """
                     UPDATE events
-                    SET suppressed_before = ?
+                    SET suppressed_before = ?, attacker_key = ?, source_type = ?, worker_zone = ?
                     WHERE instance_id = ? AND event_id = ?
                     """,
                     (
                         max(0, int(event.get("suppressed_before", 0) or 0)),
+                        attacker_key,
+                        source_type,
+                        str(worker_zone) if worker_zone else None,
                         instance.instance_id,
                         event_id,
                     ),
@@ -122,7 +163,11 @@ class GlobalCentralStore(core.CentralStore):
         rows = conn.execute(
             """
             SELECT
-                client_ip AS ip,
+                attacker_key AS identity_key,
+                attacker_key AS ip,
+                MAX(client_ip) AS client_ip,
+                MAX(source_type) AS source_type,
+                MAX(worker_zone) AS worker_zone,
                 COUNT(*) AS persisted_hits,
                 COUNT(*) + COALESCE(SUM(suppressed_before), 0) AS hits,
                 COALESCE(SUM(severity), 0) AS severity_score,
@@ -133,8 +178,8 @@ class GlobalCentralStore(core.CentralStore):
                 MIN(ts) AS first_seen,
                 MAX(ts) AS last_seen
             FROM events
-            WHERE client_ip IS NOT NULL AND client_ip != '' AND client_ip != 'unknown'
-            GROUP BY client_ip
+            WHERE attacker_key IS NOT NULL AND attacker_key != '' AND attacker_key != 'unknown'
+            GROUP BY attacker_key
             """
         ).fetchall()
 
@@ -157,8 +202,6 @@ class GlobalCentralStore(core.CentralStore):
                     "categories": result.category_bonus,
                 },
             )
-            # Keep compatibility with older dashboard consumers while making the
-            # global meaning explicit for new clients.
             item["score"] = result.score
             item["level"] = result.level
             scored.append(item)
@@ -176,18 +219,18 @@ class GlobalCentralStore(core.CentralStore):
 
     @staticmethod
     def _enrich_attacker(conn: sqlite3.Connection, item: dict[str, Any]) -> dict[str, Any]:
-        ip = item["ip"]
+        identity_key = item["identity_key"]
         apps = conn.execute(
             """
             SELECT instance_id, instance_name, COUNT(*) AS persisted_hits,
                    COUNT(*) + COALESCE(SUM(suppressed_before), 0) AS hits,
                    MAX(ts) AS last_seen
             FROM events
-            WHERE client_ip = ?
+            WHERE attacker_key = ?
             GROUP BY instance_id, instance_name
             ORDER BY hits DESC, instance_name ASC
             """,
-            (ip,),
+            (identity_key,),
         ).fetchall()
         categories = conn.execute(
             """
@@ -195,11 +238,11 @@ class GlobalCentralStore(core.CentralStore):
                    COUNT(*) + COALESCE(SUM(suppressed_before), 0) AS hits,
                    MAX(severity) AS max_severity
             FROM events
-            WHERE client_ip = ?
+            WHERE attacker_key = ?
             GROUP BY category
             ORDER BY hits DESC, category ASC
             """,
-            (ip,),
+            (identity_key,),
         ).fetchall()
         result = dict(item)
         result["apps"] = [row["instance_name"] for row in apps]
@@ -231,6 +274,7 @@ class GlobalCentralStore(core.CentralStore):
         )
         snapshot["global_scoring"] = {
             "version": SCORING_VERSION,
+            "identity": "attacker_key (Cloudflare Workers split by trusted CF-Worker zone)",
             "levels": level_counts,
             "policy": {
                 "level2": "hits>=3 or score>=10 or apps>=2",
@@ -243,17 +287,21 @@ class GlobalCentralStore(core.CentralStore):
         }
         return snapshot
 
-    async def attacker_snapshot(self, ip: str) -> dict[str, Any] | None:
+    async def attacker_snapshot(self, identity_key: str) -> dict[str, Any] | None:
         async with self.lock:
             import asyncio
 
-            return await asyncio.to_thread(self._attacker_snapshot_sync, ip)
+            return await asyncio.to_thread(self._attacker_snapshot_sync, identity_key)
 
-    def _attacker_snapshot_sync(self, ip: str) -> dict[str, Any] | None:
+    def _attacker_snapshot_sync(self, identity_key: str) -> dict[str, Any] | None:
         conn = self._connect()
         try:
             attacker = next(
-                (row for row in self._aggregate_attackers(conn) if row["ip"] == ip),
+                (
+                    row
+                    for row in self._aggregate_attackers(conn)
+                    if row["identity_key"] == identity_key
+                ),
                 None,
             )
             if attacker is None:
@@ -261,15 +309,16 @@ class GlobalCentralStore(core.CentralStore):
             result = self._enrich_attacker(conn, attacker)
             recent = conn.execute(
                 """
-                SELECT instance_id, instance_name, event_id, ts, method, path, category,
-                       action, scanner, severity, escalation_level, attacker_score,
-                       suppressed_before
+                SELECT instance_id, instance_name, event_id, ts, client_ip,
+                       attacker_key AS identity_key, source_type, worker_zone,
+                       method, path, category, action, scanner, severity,
+                       escalation_level, attacker_score, suppressed_before
                 FROM events
-                WHERE client_ip = ?
+                WHERE attacker_key = ?
                 ORDER BY ts DESC
                 LIMIT 100
                 """,
-                (ip,),
+                (identity_key,),
             ).fetchall()
             result["recent"] = [dict(row) for row in recent]
             result["scoring_version"] = SCORING_VERSION
