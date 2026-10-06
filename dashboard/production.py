@@ -87,18 +87,12 @@ class ProductionDashboard(core.Dashboard):
             remote_max = int(payload.get("event_cursor_max", 0) or 0)
             if remote_source:
                 if known_source and remote_source != known_source:
-                    # Event IDs are only monotonic within one source generation. Drop
-                    # the old raw generation (already preserved in lifetime rollups),
-                    # reset the cursor, then refetch from zero so IDs cannot collide.
                     await self.store.reset_source(instance.instance_id, remote_source)
                     cursor = 0
                     known_source = remote_source
                     pages = 0
                     continue
                 if not known_source:
-                    # During a rolling upgrade an older dashboard cursor may predate
-                    # source IDs. A high-water mark lower than our saved cursor proves
-                    # the local Hotpot DB was recreated before source tracking existed.
                     if "event_cursor_max" in payload and cursor > remote_max:
                         await self.store.reset_source(instance.instance_id, remote_source)
                         cursor = 0
@@ -120,7 +114,8 @@ class ProductionDashboard(core.Dashboard):
 
     def enrich_attacker(self, row: dict[str, Any]) -> dict[str, Any]:
         enriched = dict(row)
-        enriched["network"] = self.geoip.lookup(str(row.get("ip", "")))
+        network_ip = str(row.get("client_ip") or row.get("ip") or "")
+        enriched["network"] = self.geoip.lookup(network_ip)
         return enriched
 
     async def _maybe_housekeep(self) -> None:
@@ -158,10 +153,13 @@ class ProductionDashboard(core.Dashboard):
 
     async def api_attacker(self, request: web.Request) -> web.Response:
         self.require_auth(request)
-        ip = request.query.get("ip", "").strip()
-        if not ip:
-            raise web.HTTPBadRequest(text="ip query parameter is required")
-        result = await self.store.attacker_snapshot(ip)
+        identity_key = (
+            request.query.get("key", "").strip()
+            or request.query.get("ip", "").strip()
+        )
+        if not identity_key:
+            raise web.HTTPBadRequest(text="key (or legacy ip) query parameter is required")
+        result = await self.store.attacker_snapshot(identity_key)
         if result is None:
             raise web.HTTPNotFound(text="attacker not found")
         self.geoip.reload_if_changed()
@@ -200,7 +198,7 @@ PRODUCTION_HTML = PRODUCTION_HTML.replace(
 )
 PRODUCTION_HTML = PRODUCTION_HTML.replace(
     "<strong>${esc(o.ip)}</strong> · score ${fmt(o.score)} · ${fmt(o.hits)} hits · ${o.app_count} apps<div class=\"muted\">${esc(o.apps.join(', '))}</div>",
-    "<strong>${esc(o.ip)}</strong> · <strong>Global L${fmt(o.global_level||o.level)}</strong> · score ${fmt(o.global_score||o.score)} · ${fmt(o.hits)} hits<div class=\"muted\">${fmt(o.app_count)} apps · ${fmt(o.category_count)} categories · ${esc((o.apps||[]).join(', '))}</div><div class=\"muted\">${o.network?.asn?'AS'+esc(o.network.asn)+' · ':''}${esc(o.network?.provider||'Unknown provider')}${o.network?.country?' · '+esc(o.network.country):''}${o.network?.city?' · '+esc(o.network.city):''}</div><div class=\"muted\">Lifetime ${fmt(o.lifetime?.lifetime_hits||o.hits)} hits${o.lifetime?.first_seen?' · first '+esc(new Date(o.lifetime.first_seen).toLocaleDateString()):''}</div>",
+    "<strong>${o.source_type==='cloudflare-worker'?'Cloudflare Worker · '+esc(o.worker_zone||'legacy/unknown zone'):esc(o.identity_key||o.ip)}</strong> · <strong>Global L${fmt(o.global_level||o.level)}</strong> · score ${fmt(o.global_score||o.score)} · ${fmt(o.hits)} hits<div class=\"muted\">${fmt(o.app_count)} apps · ${fmt(o.category_count)} categories · ${esc((o.apps||[]).join(', '))}</div><div class=\"muted\">${o.source_type==='cloudflare-worker'?'Observed via '+esc(o.client_ip||'Cloudflare shared address')+' · ':''}${o.network?.asn?'AS'+esc(o.network.asn)+' · ':''}${esc(o.network?.provider||'Unknown provider')}${o.network?.country?' · '+esc(o.network.country):''}${o.network?.city?' · '+esc(o.network.city):''}</div><div class=\"muted\">Lifetime ${fmt(o.lifetime?.lifetime_hits||o.hits)} hits${o.lifetime?.first_seen?' · first '+esc(new Date(o.lifetime.first_seen).toLocaleDateString()):''}</div>",
 )
 
 
