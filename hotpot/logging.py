@@ -14,14 +14,21 @@ class EventLogger:
         self._lock = asyncio.Lock()
 
     async def write(self, event: dict[str, Any]) -> None:
-        payload = {"timestamp": datetime.now(timezone.utc).isoformat(), **event}
-        line = json.dumps(payload, separators=(",", ":"), ensure_ascii=False) + "\n"
-        async with self._lock:
-            await asyncio.to_thread(self._append, line)
+        await self.write_many([event])
 
-    def _append(self, line: str) -> None:
+    async def write_many(self, events: list[dict[str, Any]]) -> None:
+        if not events:
+            return
+        lines = []
+        for event in events:
+            payload = {"timestamp": datetime.now(timezone.utc).isoformat(), **event}
+            lines.append(json.dumps(payload, separators=(",", ":"), ensure_ascii=False) + "\n")
+        async with self._lock:
+            await asyncio.to_thread(self._append_many, lines)
+
+    def _append_many(self, lines: list[str]) -> None:
         with self.path.open("a", encoding="utf-8") as fh:
-            fh.write(line)
+            fh.writelines(lines)
 
     async def cleanup(self, retention_days: int) -> int:
         async with self._lock:
@@ -32,7 +39,7 @@ class EventLogger:
             return 0
         cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
         temp = self.path.with_suffix(".jsonl.tmp")
-        kept = deleted = 0
+        deleted = 0
         with self.path.open("r", encoding="utf-8", errors="replace") as src, temp.open("w", encoding="utf-8") as dst:
             for line in src:
                 keep = True
@@ -41,11 +48,9 @@ class EventLogger:
                     ts = datetime.fromisoformat(str(payload.get("timestamp", "")))
                     keep = ts >= cutoff
                 except (ValueError, TypeError, json.JSONDecodeError):
-                    # Preserve malformed/legacy lines rather than deleting data we cannot date safely.
                     keep = True
                 if keep:
                     dst.write(line)
-                    kept += 1
                 else:
                     deleted += 1
         temp.replace(self.path)
