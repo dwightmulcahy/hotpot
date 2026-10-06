@@ -13,6 +13,7 @@ services:
 
     volumes:
       - /share/Data/config/cloudflared/hotpot-dashboard-data:/data
+      - /share/Data/config/cloudflared/geoip:/geoip:ro
 
     read_only: true
 
