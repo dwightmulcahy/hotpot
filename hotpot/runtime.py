@@ -9,16 +9,91 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from aiohttp import ClientTimeout, web
+from aiohttp import ClientSession, ClientTimeout, web
 
+from . import app as core_app
 from .app import HOTPOT_APP_KEY, Hotpot
 from .config import Settings
 from .intelligence import classify, escalation_for
-from .store import AttackerState
+from .logging import EventLogger as RealEventLogger
+from .store import AttackerState, IntelligenceStore as RealIntelligenceStore
+
+
+class ResilientEventLogger:
+    def __init__(self, data_dir: Path):
+        self.inner: RealEventLogger | None = None
+        try:
+            self.inner = RealEventLogger(data_dir)
+        except Exception:
+            pass
+
+    async def write(self, event: dict[str, Any]) -> None:
+        if self.inner is not None:
+            await self.inner.write(event)
+
+    async def cleanup(self, retention_days: int) -> int:
+        if self.inner is None:
+            return 0
+        return await self.inner.cleanup(retention_days)
+
+
+class ResilientStore:
+    def __init__(self, data_dir: Path):
+        self.inner: RealIntelligenceStore | None = None
+        self.path: Path | None = None
+        try:
+            self.inner = RealIntelligenceStore(data_dir)
+            self.path = self.inner.path
+        except Exception:
+            pass
+
+    async def state_for(self, ip: str) -> AttackerState:
+        if self.inner is None:
+            return AttackerState(ip, 0, 0, None, None, None, None, 1)
+        return await self.inner.state_for(ip)
+
+    async def record(self, event: dict[str, Any], *, score: int, escalation_level: int) -> None:
+        if self.inner is not None:
+            await self.inner.record(event, score=score, escalation_level=escalation_level)
+
+    async def claim_notification(self, ip: str, level: int, cooldown_seconds: int) -> bool:
+        if self.inner is None:
+            return False
+        return await self.inner.claim_notification(ip, level, cooldown_seconds)
+
+    async def cleanup(self, retention_days: int, attacker_retention_days: int) -> dict[str, int]:
+        if self.inner is None:
+            return {"events_deleted": 0, "attackers_deleted": 0}
+        return await self.inner.cleanup(retention_days, attacker_retention_days)
+
+    async def attacker_history(self, ip: str, limit: int = 100) -> dict[str, Any]:
+        if self.inner is None:
+            return {"attacker": None, "events": []}
+        return await self.inner.attacker_history(ip, limit)
+
+    async def dashboard_snapshot(self, limit: int = 25) -> dict[str, Any]:
+        if self.inner is None:
+            return {
+                "events": 0,
+                "unique_ips": 0,
+                "top_paths": [],
+                "top_categories": [],
+                "top_scanners": [],
+                "top_offenders": [],
+                "top_fingerprints": [],
+                "recent": [],
+            }
+        return await self.inner.dashboard_snapshot(limit)
+
+
+# Hotpot resolves these names from hotpot.app at runtime inside __init__, so the
+# wrappers let the proxy continue even when /data cannot be initialized.
+core_app.EventLogger = ResilientEventLogger
+core_app.IntelligenceStore = ResilientStore
 
 
 class HardenedHotpot(Hotpot):
-    """Operational hardening layer kept separate from the core proxy implementation."""
+    """Operational hardening layer for production deployments."""
 
     def __init__(self, settings: Settings):
         super().__init__(settings)
@@ -40,9 +115,23 @@ class HardenedHotpot(Hotpot):
         self.stats["tarpits_completed"] = 0
         self.stats["tarpits_disconnected"] = 0
         self.stats["telemetry_errors"] = 0
+        if getattr(self.store, "inner", object()) is None:
+            self.stats["telemetry_errors"] += 1
+            self.stats["sqlite_init_errors"] += 1
+        if getattr(self.events, "inner", object()) is None:
+            self.stats["telemetry_errors"] += 1
+            self.stats["jsonl_init_errors"] += 1
 
     async def startup(self, app: web.Application) -> None:
-        await super().startup(app)
+        # Housekeeping is useful but never allowed to prevent the proxy from starting.
+        try:
+            await self.run_housekeeping()
+        except Exception:
+            self.stats["telemetry_errors"] += 1
+            self.stats["housekeeping_errors"] += 1
+        timeout = ClientTimeout(total=self.settings.upstream_timeout)
+        self.client = ClientSession(timeout=timeout, auto_decompress=False)
+        self.housekeeping_task = asyncio.create_task(self.housekeeping_loop(), name="hotpot-housekeeping")
         await self.check_upstream()
         self.health_task = asyncio.create_task(self.health_loop(), name="hotpot-upstream-health")
 
@@ -70,10 +159,8 @@ class HardenedHotpot(Hotpot):
         try:
             timeout = ClientTimeout(total=self.health_timeout)
             async with self.client.get(self.settings.upstream + "/", allow_redirects=False, timeout=timeout) as response:
-                # A 5xx response means the upstream itself says it is not ready. Any
-                # other HTTP response proves the application is reachable.
                 healthy = response.status < 500
-                await response.release()
+                await response.read()
                 latency = round((time.monotonic() - started) * 1000, 1)
                 failures = 0 if healthy else int(previous.get("consecutive_failures", 0)) + 1
                 self.upstream_health = {
@@ -110,13 +197,41 @@ class HardenedHotpot(Hotpot):
         return web.json_response(payload, status=200 if payload["healthy"] else 503)
 
     async def status(self, request: web.Request) -> web.Response:
-        response = await super().status(request)
-        payload = json.loads(response.text)
-        payload["healthy"] = bool(self.upstream_health["healthy"])
-        payload["instance_id"] = self.settings.instance_id
-        payload["instance_name"] = self.settings.instance_name
-        payload["upstream_health"] = self.upstream_health
-        payload["stats"] = dict(self.stats)
+        if not self.authorized(request):
+            raise web.HTTPUnauthorized()
+        try:
+            snapshot = await self.store.dashboard_snapshot(limit=10)
+        except Exception:
+            self.stats["telemetry_errors"] += 1
+            self.stats["sqlite_read_errors"] += 1
+            snapshot = {"events": 0, "unique_ips": 0, "top_categories": [], "top_offenders": []}
+        payload = {
+            "healthy": bool(self.upstream_health["healthy"]),
+            "instance_id": self.settings.instance_id,
+            "instance_name": self.settings.instance_name,
+            "upstream": self.settings.upstream,
+            "upstream_health": self.upstream_health,
+            "profiles": self.settings.enabled_profiles,
+            "rules": len(self.rules.rules),
+            "tarpit": {
+                "enabled": self.settings.tarpit_enabled,
+                "max_concurrent": self.settings.tarpit_max_concurrent,
+                "max_seconds": self.settings.tarpit_max_seconds,
+                "escalated_max_seconds": self.settings.tarpit_escalated_max_seconds,
+            },
+            "client_ip": {
+                "mode": self.settings.client_ip_mode,
+                "trusted_proxy_cidrs": self.settings.trusted_proxy_cidrs,
+            },
+            "stats": dict(self.stats),
+            "intelligence": {
+                "events": snapshot.get("events", 0),
+                "unique_ips": snapshot.get("unique_ips", 0),
+                "top_categories": snapshot.get("top_categories", [])[:5],
+                "top_offenders": snapshot.get("top_offenders", [])[:5],
+            },
+            "uptime_seconds": int(time.monotonic() - self.started),
+        }
         return web.json_response(payload, headers={"Cache-Control": "no-store"})
 
     async def events_api(self, request: web.Request) -> web.Response:
@@ -133,7 +248,10 @@ class HardenedHotpot(Hotpot):
         return web.json_response(result, headers={"Cache-Control": "no-store"})
 
     def _events_since_sync(self, cursor: int, limit: int) -> dict[str, Any]:
-        conn = sqlite3.connect(self.store.path, timeout=10)
+        path = getattr(self.store, "path", None)
+        if path is None:
+            return {"events": [], "next_cursor": cursor, "has_more": False}
+        conn = sqlite3.connect(path, timeout=10)
         conn.row_factory = sqlite3.Row
         try:
             rows = conn.execute(
@@ -188,9 +306,6 @@ class HardenedHotpot(Hotpot):
         ip = identity.client_ip
         user_agent = request.headers.get("User-Agent", "")
         classification = classify(user_agent, rule.category, request.method, request.path_qs)
-
-        # Intelligence persistence is deliberately fail-open: telemetry failures must
-        # never turn a deceptive request into a 500 or make Hotpot unavailable.
         prior = AttackerState(ip, 0, 0, None, None, None, None, 1)
         try:
             async with self.intelligence_lock:
@@ -239,8 +354,6 @@ class HardenedHotpot(Hotpot):
                     self.stats["telemetry_errors"] += 1
                     self.stats["sqlite_write_errors"] += 1
         except Exception:
-            # A final safety net around scoring itself. The response still follows the
-            # rule if any unexpected intelligence subsystem error occurs.
             effective_action = rule.action
             event = {
                 "event": "deception", "client_ip": ip, "method": request.method,
