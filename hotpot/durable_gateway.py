@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 
 from aiohttp import web
 
@@ -24,6 +25,17 @@ class DurableGatewayHotpot(GatewayHotpot):
         value = getattr(inner, "source_id", None)
         return str(value) if value else None
 
+    def _max_event_id_sync(self) -> int:
+        path = getattr(self.store, "path", None)
+        if path is None:
+            return 0
+        conn = sqlite3.connect(path, timeout=10)
+        try:
+            row = conn.execute("SELECT COALESCE(MAX(id), 0) FROM events").fetchone()
+            return int(row[0] or 0) if row else 0
+        finally:
+            conn.close()
+
     async def events_api(self, request: web.Request) -> web.Response:
         if not self.authorized(request):
             raise web.HTTPUnauthorized()
@@ -37,12 +49,18 @@ class DurableGatewayHotpot(GatewayHotpot):
         result["instance_id"] = self.settings.instance_id
         result["instance_name"] = self.settings.instance_name
         result["source_id"] = self.source_id
+        result["event_cursor_max"] = await runtime_layer.asyncio.to_thread(
+            self._max_event_id_sync
+        )
         return web.json_response(result, headers={"Cache-Control": "no-store"})
 
     async def status(self, request: web.Request) -> web.Response:
         response = await super().status(request)
         payload = json.loads(response.text)
         payload["source_id"] = self.source_id
+        payload["event_cursor_max"] = await runtime_layer.asyncio.to_thread(
+            self._max_event_id_sync
+        )
         return web.json_response(payload, headers={"Cache-Control": "no-store"})
 
 
