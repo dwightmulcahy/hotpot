@@ -33,6 +33,10 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Capture build identity
+        id: build-identity
+        run: echo "build_date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
+
       - name: Generate Hotpot Docker metadata
         id: hotpot-meta
         uses: docker/metadata-action@v6
@@ -69,6 +73,10 @@ jobs:
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.hotpot-meta.outputs.tags }}
           labels: ${{ steps.hotpot-meta.outputs.labels }}
+          build-args: |
+            HOTPOT_VERSION=${{ github.ref_name }}
+            HOTPOT_GIT_SHA=${{ github.sha }}
+            HOTPOT_BUILD_DATE=${{ steps.build-identity.outputs.build_date }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: mode=max
@@ -83,6 +91,10 @@ jobs:
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.dashboard-meta.outputs.tags }}
           labels: ${{ steps.dashboard-meta.outputs.labels }}
+          build-args: |
+            HOTPOT_VERSION=${{ github.ref_name }}
+            HOTPOT_GIT_SHA=${{ github.sha }}
+            HOTPOT_BUILD_DATE=${{ steps.build-identity.outputs.build_date }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: mode=max
