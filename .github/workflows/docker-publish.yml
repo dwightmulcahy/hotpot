@@ -1,4 +1,4 @@
-name: Publish Docker images
+name: Publish Docker images and GitHub release
 
 on:
   push:
@@ -87,3 +87,33 @@ jobs:
           cache-to: type=gha,mode=max
           provenance: mode=max
           sbom: true
+
+  release:
+    name: Create GitHub release
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out repository with full history
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Generate release notes from Conventional Commits
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          python .github/scripts/release_notes.py \
+            --tag "${GITHUB_REF_NAME}" \
+            --output RELEASE_NOTES.md
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "Hotpot ${GITHUB_REF_NAME}" \
+            --notes-file RELEASE_NOTES.md \
+            --verify-tag
