@@ -1,4 +1,21 @@
 services:
+  geoipupdate:
+    image: ghcr.io/maxmind/geoipupdate:latest
+    container_name: geoipupdate
+    restart: unless-stopped
+
+    env_file:
+      - /share/Data/config/cloudflared/geoipupdate.env
+
+    volumes:
+      - /share/Data/config/cloudflared/geoip:/usr/share/GeoIP
+
+    security_opt:
+      - no-new-privileges:true
+
+    cap_drop:
+      - ALL
+
   hotpot-dashboard:
     build:
       context: .
