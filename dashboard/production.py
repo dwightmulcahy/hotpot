@@ -8,30 +8,25 @@ from typing import Any
 from aiohttp import web
 
 from . import runtime as core
+from .geoip_enrichment import GeoIPEnricher
 from .global_scoring import GlobalCentralStore
 
 
 class ProductionDashboard(core.Dashboard):
     def __init__(self) -> None:
         super().__init__()
-        # Replace the base central store with the scoring-aware store. It reuses the
-        # same SQLite file and performs an additive schema migration in place.
-        self.store = GlobalCentralStore(
-            Path(os.getenv("HOTPOT_DASHBOARD_DATA_DIR", "/data"))
-        )
+        self.store = GlobalCentralStore(Path(os.getenv("HOTPOT_DASHBOARD_DATA_DIR", "/data")))
+        self.geoip = GeoIPEnricher()
+
+    async def shutdown(self, app: web.Application) -> None:
+        self.geoip.close()
+        await super().shutdown(app)
 
     async def collect_status(self, instance) -> dict[str, Any]:
         row = await super().collect_status(instance)
         if row.get("error"):
-            row.update(
-                events_suppressed=0,
-                events_persisted=0,
-                version="unknown",
-                git_sha="unknown",
-                build_date="unknown",
-            )
+            row.update(events_suppressed=0, events_persisted=0, version="unknown", git_sha="unknown", build_date="unknown")
             return row
-
         try:
             status = await self.fetch_json(f"{instance.url}/_hotpot/status")
             stats = status.get("stats", {}) if isinstance(status, dict) else {}
@@ -43,22 +38,21 @@ class ProductionDashboard(core.Dashboard):
                 build_date=str(status.get("build_date", "unknown")),
             )
         except Exception:
-            row.update(
-                events_suppressed=0,
-                events_persisted=0,
-                version="unknown",
-                git_sha="unknown",
-                build_date="unknown",
-            )
+            row.update(events_suppressed=0, events_persisted=0, version="unknown", git_sha="unknown", build_date="unknown")
         return row
+
+    def enrich_attacker(self, row: dict[str, Any]) -> dict[str, Any]:
+        enriched = dict(row)
+        enriched["network"] = self.geoip.lookup(str(row.get("ip", "")))
+        return enriched
 
     async def refresh(self) -> None:
         await asyncio.gather(*(self.collect_events(instance) for instance in self.instances))
         apps = await asyncio.gather(*(self.collect_status(instance) for instance in self.instances))
         snapshot = await self.store.snapshot(list(apps))
-        snapshot["summary"]["suppressed_events"] = sum(
-            int(app.get("events_suppressed", 0) or 0) for app in apps
-        )
+        snapshot["summary"]["suppressed_events"] = sum(int(app.get("events_suppressed", 0) or 0) for app in apps)
+        snapshot["top_offenders"] = [self.enrich_attacker(row) for row in snapshot.get("top_offenders", [])]
+        snapshot["geoip"] = self.geoip.status()
         async with self.cache_lock:
             self.cache = snapshot
 
@@ -70,6 +64,7 @@ class ProductionDashboard(core.Dashboard):
         result = await self.store.attacker_snapshot(ip)
         if result is None:
             raise web.HTTPNotFound(text="attacker not found")
+        result = self.enrich_attacker(result)
         return web.json_response(result, headers={"Cache-Control": "no-store"})
 
     async def index(self, request: web.Request) -> web.Response:
@@ -104,7 +99,7 @@ PRODUCTION_HTML = PRODUCTION_HTML.replace(
 )
 PRODUCTION_HTML = PRODUCTION_HTML.replace(
     "<strong>${esc(o.ip)}</strong> · score ${fmt(o.score)} · ${fmt(o.hits)} hits · ${o.app_count} apps<div class=\"muted\">${esc(o.apps.join(', '))}</div>",
-    "<strong>${esc(o.ip)}</strong> · <strong>Global L${fmt(o.global_level||o.level)}</strong> · score ${fmt(o.global_score||o.score)} · ${fmt(o.hits)} hits<div class=\"muted\">${fmt(o.app_count)} apps · ${fmt(o.category_count)} categories · ${esc((o.apps||[]).join(', '))}</div>",
+    "<strong>${esc(o.ip)}</strong> · <strong>Global L${fmt(o.global_level||o.level)}</strong> · score ${fmt(o.global_score||o.score)} · ${fmt(o.hits)} hits<div class=\"muted\">${fmt(o.app_count)} apps · ${fmt(o.category_count)} categories · ${esc((o.apps||[]).join(', '))}</div><div class=\"muted\">${o.network?.asn?'AS'+esc(o.network.asn)+' · ':''}${esc(o.network?.provider||'Unknown provider')}${o.network?.country?' · '+esc(o.network.country):''}${o.network?.city?' · '+esc(o.network.city):''}</div>",
 )
 
 
