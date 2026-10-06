@@ -8,7 +8,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY dashboard ./dashboard
-RUN chown -R hotpot:hotpot /app
+RUN mkdir -p /data && chown -R hotpot:hotpot /data /app
 USER 10001:10001
 EXPOSE 19090
-CMD ["python", "-m", "dashboard.app"]
+CMD ["python", "-m", "dashboard.runtime"]

@@ -13,4 +13,4 @@ COPY profiles ./profiles
 RUN mkdir -p /data && chown -R hotpot:hotpot /data /app
 USER 10001:10001
 EXPOSE 8080
-CMD ["python", "-m", "hotpot.app"]
+CMD ["python", "-m", "hotpot.runtime"]

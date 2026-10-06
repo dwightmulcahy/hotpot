@@ -135,6 +135,8 @@ services:
     user: "1000:100"
     env_file:
       - /share/Data/config/cloudflared/dashboard.env
+    volumes:
+      - /share/Data/config/cloudflared/hotpot-dashboard-data:/data
     read_only: true
     tmpfs:
       - /tmp:size=16m,mode=1777
