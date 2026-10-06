@@ -21,6 +21,8 @@ class Settings:
     bind: str
     port: int
     upstream: str
+    instance_id: str
+    instance_name: str
     data_dir: Path
     profiles_dir: Path
     enabled_profiles: tuple[str, ...]
@@ -57,10 +59,14 @@ class Settings:
         if not upstream:
             raise RuntimeError("HOTPOT_UPSTREAM is required, e.g. http://myapp:8080")
         profiles = env_csv("HOTPOT_PROFILES", "wordpress,secrets,git,php,generic")
+        instance_id = os.getenv("HOTPOT_INSTANCE_ID", "hotpot").strip() or "hotpot"
+        instance_name = os.getenv("HOTPOT_INSTANCE_NAME", instance_id).strip() or instance_id
         return cls(
             bind=os.getenv("HOTPOT_BIND", "0.0.0.0"),
             port=int(os.getenv("HOTPOT_PORT", "8080")),
             upstream=upstream,
+            instance_id=instance_id,
+            instance_name=instance_name,
             data_dir=Path(os.getenv("HOTPOT_DATA_DIR", "/data")),
             profiles_dir=Path(os.getenv("HOTPOT_PROFILES_DIR", "/app/profiles")),
             enabled_profiles=profiles,
