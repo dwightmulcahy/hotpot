@@ -90,7 +90,53 @@ class GeoIPEnrichmentTests(unittest.TestCase):
         self.assertEqual(enricher.reload_count, 1)
         self.assertIsNotNone(enricher.last_reload_at)
 
-    def test_status_exposes_database_age_and_revision(self):
+    def test_failed_replacement_is_retried_without_advancing_loaded_revision(self):
+        if geoip_module.geoip2 is None:
+            self.skipTest("geoip2 dependency unavailable")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "GeoLite2-ASN.mmdb"
+            db_path.write_bytes(b"good-initial-mmdb")
+            with patch.object(
+                geoip_module.geoip2.database,
+                "Reader",
+                return_value=FakeASNReader(),
+            ):
+                enricher = GeoIPEnricher(asn_db=db_path, country_db="", city_db="")
+
+            loaded_revision = enricher.revision()
+            loaded_signature = enricher._signatures["asn"]
+            db_path.write_bytes(b"bad-replacement-with-different-size")
+
+            with patch.object(
+                geoip_module.geoip2.database,
+                "Reader",
+                side_effect=RuntimeError("corrupt"),
+            ) as reader:
+                self.assertFalse(enricher.reload_if_changed())
+                self.assertFalse(enricher.reload_if_changed())
+                self.assertEqual(reader.call_count, 2)
+
+            self.assertEqual(enricher.revision(), loaded_revision)
+            self.assertEqual(enricher._signatures["asn"], loaded_signature)
+            status = enricher.status()
+            self.assertTrue(status["reload_pending"])
+            self.assertGreaterEqual(status["reload_failure_count"], 2)
+            self.assertIsNotNone(status["last_reload_error_at"])
+            self.assertNotEqual(status["observed_revision"], status["revision"])
+
+            with patch.object(
+                geoip_module.geoip2.database,
+                "Reader",
+                return_value=FakeASNReader(),
+            ):
+                self.assertTrue(enricher.reload_if_changed())
+            self.assertNotEqual(enricher.revision(), loaded_revision)
+            self.assertFalse(enricher.status()["reload_pending"])
+            self.assertEqual(enricher.errors, [])
+            enricher.close()
+
+    def test_status_exposes_database_age_and_loaded_revision(self):
         if geoip_module.geoip2 is None:
             self.skipTest("geoip2 dependency unavailable")
 
@@ -114,6 +160,8 @@ class GeoIPEnrichmentTests(unittest.TestCase):
             self.assertIsNotNone(status["databases"]["asn"]["age_seconds"])
             self.assertGreater(status["databases"]["asn"]["size"], 0)
             self.assertEqual(status["revision"], enricher.revision())
+            self.assertEqual(status["observed_revision"], status["revision"])
+            self.assertFalse(status["reload_pending"])
             self.assertIsNotNone(status["oldest_database_age_seconds"])
             enricher.close()
 
