@@ -7,7 +7,7 @@ from pathlib import Path
 class DashboardArchitectureTests(unittest.TestCase):
     def test_single_runtime_entrypoint_and_static_enhancements(self) -> None:
         root = Path(__file__).resolve().parents[1]
-        app = (root / "dashboard" / "app.py").read_text(encoding="utf-8")
+        server = (root / "dashboard" / "server.py").read_text(encoding="utf-8")
         dockerfile = (root / "Dockerfile.dashboard").read_text(encoding="utf-8")
         security_js = (root / "dashboard" / "static" / "security.js").read_text(
             encoding="utf-8"
@@ -15,11 +15,11 @@ class DashboardArchitectureTests(unittest.TestCase):
         observability_js = (
             root / "dashboard" / "static" / "observability.js"
         ).read_text(encoding="utf-8")
-        self.assertIn("class DashboardApplication(ProductionDashboard)", app)
-        self.assertNotIn(".replace(", app)
-        self.assertIn("partition(\"</head>\")", app)
-        self.assertIn("add_static", app)
-        self.assertIn('CMD ["python", "-m", "dashboard.app"]', dockerfile)
+        self.assertIn("class DashboardApplication(ProductionDashboard)", server)
+        self.assertNotIn(".replace(", server)
+        self.assertIn("partition(\"</head>\")", server)
+        self.assertIn("add_static", server)
+        self.assertIn('CMD ["python", "-m", "dashboard.server"]', dockerfile)
         self.assertIn("X-Hotpot-CSRF", security_js)
         self.assertIn("/api/notifications/test", observability_js)
         self.assertIn("Investigation timeline", observability_js)
@@ -32,8 +32,14 @@ class DashboardArchitectureTests(unittest.TestCase):
         )
         routed = (root / "routed_production.py").read_text(encoding="utf-8")
         for text in (secure, observability, routed):
-            self.assertIn("from .app import", text)
+            self.assertIn("from .server import", text)
             self.assertNotIn("class ", text)
+
+    def test_legacy_dashboard_module_remains_import_compatible(self) -> None:
+        root = Path(__file__).resolve().parents[1] / "dashboard"
+        legacy = (root / "app.py").read_text(encoding="utf-8")
+        self.assertIn("class Dashboard:", legacy)
+        self.assertIn("def aggregate", legacy)
 
 
 if __name__ == "__main__":

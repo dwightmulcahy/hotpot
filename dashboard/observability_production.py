@@ -1,6 +1,12 @@
-"""Compatibility import for deployments that referenced the former observability layer."""
+"""Compatibility import for deployments/tests that referenced the former observability layer."""
 
-from .app import DashboardApplication as ObservabilityDashboard
-from .app import build_app, main
+from pathlib import Path
 
-__all__ = ["ObservabilityDashboard", "build_app", "main"]
+from .server import DashboardApplication as ObservabilityDashboard
+from .server import build_app, main
+
+_STATIC = Path(__file__).with_name("static")
+EXTRA_CSS = (_STATIC / "observability.css").read_text(encoding="utf-8")
+EXTRA_JS = (_STATIC / "observability.js").read_text(encoding="utf-8")
+
+__all__ = ["ObservabilityDashboard", "EXTRA_CSS", "EXTRA_JS", "build_app", "main"]
