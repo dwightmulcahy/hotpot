@@ -25,6 +25,9 @@ class DashboardProductionTests(unittest.IsolatedAsyncioTestCase):
                 "HOTPOT_ADMIN_TOKEN": "collector-token",
                 "HOTPOT_DASHBOARD_TOKEN": "viewer-token",
                 "HOTPOT_DASHBOARD_DATA_DIR": self.tmp.name,
+                "HOTPOT_CLOUDFLARE_ENFORCEMENT_ENABLED": "false",
+                "HOTPOT_CLOUDFLARE_API_TOKEN": "",
+                "HOTPOT_CLOUDFLARE_TARGETS": "",
             },
             clear=False,
         ):
@@ -74,19 +77,34 @@ class DashboardProductionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["allowlist_cidrs"], ["10.0.0.0/8"])
         self.assertEqual(row["trusted_proxy_cidrs"], ["127.0.0.1/32"])
 
-    def test_dashboard_html_surfaces_operations_and_response_without_string_rewrite(self) -> None:
+    def test_cloudflare_enforcement_defaults_to_explicit_opt_in(self) -> None:
+        dashboard = self.make_dashboard()
+        status = dashboard.cloudflare.public_status()
+        self.assertFalse(status["enabled"])
+        self.assertFalse(status["configured"])
+        self.assertTrue(status["approval_required"])
+        self.assertFalse(status["automatic_enforcement"])
+
+    def test_dashboard_html_surfaces_approval_and_enforcement_without_string_rewrite(self) -> None:
         self.assertIn("Suppressed", PRODUCTION_HTML)
         self.assertIn("Top networks / ASNs", PRODUCTION_HTML)
         self.assertIn("Operational health", PRODUCTION_HTML)
         self.assertIn("GeoIP / attribution", PRODUCTION_HTML)
         self.assertIn("Response recommendations", PRODUCTION_HTML)
+        self.assertIn("Active Cloudflare enforcement", PRODUCTION_HTML)
         self.assertIn("Pending response", PRODUCTION_HTML)
+        self.assertIn("Applied rules", PRODUCTION_HTML)
+        self.assertIn("Approve", PRODUCTION_HTML)
+        self.assertIn("Remove now", PRODUCTION_HTML)
+        self.assertIn("X-Hotpot-Action", PRODUCTION_HTML)
         self.assertIn("/api/recommendation/", PRODUCTION_HTML)
         self.assertIn("Backlog", PRODUCTION_HTML)
         root = Path(__file__).resolve().parents[1]
         production = (root / "dashboard" / "production.py").read_text(encoding="utf-8")
         self.assertNotIn("PRODUCTION_HTML.replace", production)
         self.assertIn("from .template import PRODUCTION_HTML", production)
+        self.assertIn("api_approve_recommendation", production)
+        self.assertIn("api_remove_enforcement", production)
 
     def test_dashboard_image_copies_server_header_hardening(self) -> None:
         root = Path(__file__).resolve().parents[1]
