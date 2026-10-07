@@ -37,7 +37,8 @@ class CloudflareConfig:
 
     @property
     def can_remove(self) -> bool:
-        # Removal uses rule metadata persisted at apply time and only needs API auth.
+        # Removal and reconciliation use rule metadata persisted at apply time and
+        # only need API auth.
         return bool(self.api_token)
 
     def public_status(self) -> dict[str, Any]:
@@ -69,13 +70,17 @@ def parse_cloudflare_targets(raw: str) -> dict[str, CloudflareTarget]:
     for instance_id, value in payload.items():
         key = str(instance_id).strip()
         if not key or not isinstance(value, dict):
-            raise RuntimeError("Each Cloudflare target requires an instance id and object value")
+            raise RuntimeError(
+                "Each Cloudflare target requires an instance id and object value"
+            )
         zone_id = str(value.get("zone_id") or "").strip()
         hosts_raw = value.get("hosts") or []
         if not zone_id:
             raise RuntimeError(f"Cloudflare target {key!r} requires zone_id")
         if not isinstance(hosts_raw, list) or not hosts_raw:
-            raise RuntimeError(f"Cloudflare target {key!r} requires a non-empty hosts list")
+            raise RuntimeError(
+                f"Cloudflare target {key!r} requires a non-empty hosts list"
+            )
         hosts = tuple(
             sorted(
                 {
@@ -86,7 +91,9 @@ def parse_cloudflare_targets(raw: str) -> dict[str, CloudflareTarget]:
             )
         )
         if not hosts:
-            raise RuntimeError(f"Cloudflare target {key!r} requires at least one hostname")
+            raise RuntimeError(
+                f"Cloudflare target {key!r} requires at least one hostname"
+            )
         result[key] = CloudflareTarget(key, zone_id, hosts)
     return result
 
@@ -109,7 +116,9 @@ def build_expression(
     elif target_type == "cloudflare-worker-zone":
         zone = target_value.strip().lower()
         if not zone:
-            raise CloudflareEnforcementError("missing Cloudflare Worker zone target")
+            raise CloudflareEnforcementError(
+                "missing Cloudflare Worker zone target"
+            )
         actor = f"cf.worker.upstream_zone eq {_quote_wirefilter_string(zone)}"
     else:
         raise CloudflareEnforcementError(
@@ -173,25 +182,43 @@ class CloudflareEnforcer:
                 )
             return response.status, data if isinstance(data, dict) else None
 
-    async def _entrypoint_ruleset(
-        self, zone_id: str
-    ) -> tuple[str, list[dict[str, Any]]]:
+    async def inspect_zone(self, zone_id: str) -> dict[str, Any]:
+        """Read the custom-WAF entrypoint without creating or changing anything."""
+
         status, data = await self._request(
             "GET",
             f"/zones/{zone_id}/rulesets/phases/{CUSTOM_RULE_PHASE}/entrypoint",
             allow_404=True,
         )
-        if status != 404 and data:
-            result = data.get("result") or {}
-            ruleset_id = str(result.get("id") or "").strip()
-            if ruleset_id:
-                rules = [
-                    rule for rule in result.get("rules") or [] if isinstance(rule, dict)
-                ]
-                return ruleset_id, rules
+        if status == 404:
+            return {
+                "zone_id": zone_id,
+                "entrypoint_exists": False,
+                "ruleset_id": None,
+                "rules": [],
+            }
+        result = (data or {}).get("result") or {}
+        ruleset_id = str(result.get("id") or "").strip()
+        if not ruleset_id:
             raise CloudflareEnforcementError(
                 "Cloudflare entry point response omitted ruleset id"
             )
+        return {
+            "zone_id": zone_id,
+            "entrypoint_exists": True,
+            "ruleset_id": ruleset_id,
+            "rules": [
+                rule for rule in result.get("rules") or [] if isinstance(rule, dict)
+            ],
+        }
+
+    async def _entrypoint_ruleset(
+        self, zone_id: str
+    ) -> tuple[str, list[dict[str, Any]]]:
+        inspected = await self.inspect_zone(zone_id)
+        ruleset_id = str(inspected.get("ruleset_id") or "")
+        if inspected.get("entrypoint_exists") and ruleset_id:
+            return ruleset_id, list(inspected.get("rules") or [])
 
         _, created = await self._request(
             "POST",
@@ -292,9 +319,7 @@ class CloudflareEnforcer:
         )
         target_type = str(recommendation.get("target_type") or "")
         target_value = str(recommendation.get("target_value") or "")
-        cf_action = self._rule_action(
-            str(recommendation.get("action") or "")
-        )
+        cf_action = self._rule_action(str(recommendation.get("action") or ""))
         expires_at = str(
             recommendation.get("enforcement_expires_at")
             or recommendation.get("expires_at")
@@ -362,10 +387,7 @@ class CloudflareEnforcer:
                 result = (response or {}).get("result") or {}
                 rule_id = ""
                 for rule in result.get("rules") or []:
-                    if (
-                        isinstance(rule, dict)
-                        and str(rule.get("ref") or "") == ref
-                    ):
+                    if isinstance(rule, dict) and str(rule.get("ref") or "") == ref:
                         rule_id = str(rule.get("id") or "")
                         break
                 if not rule_id:
@@ -409,9 +431,7 @@ class CloudflareEnforcer:
             allow_404=True,
         )
 
-    async def remove(
-        self, rules: list[dict[str, Any]]
-    ) -> list[dict[str, Any]]:
+    async def remove(self, rules: list[dict[str, Any]]) -> list[dict[str, Any]]:
         errors: list[dict[str, Any]] = []
         for rule in rules:
             try:
@@ -425,3 +445,158 @@ class CloudflareEnforcer:
                     }
                 )
         return errors
+
+    async def reconcile(
+        self, recommendations: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        """Compare persisted Hotpot rules with Cloudflare without mutating either."""
+
+        checked_at = datetime.now(timezone.utc).isoformat()
+        expected_by_zone: dict[str, list[dict[str, Any]]] = {}
+        recommendation_results: dict[str, dict[str, Any]] = {}
+        configured_zones = {
+            target.zone_id for target in self.config.targets.values() if target.zone_id
+        }
+
+        for recommendation in recommendations:
+            recommendation_id = str(
+                recommendation.get("recommendation_id") or ""
+            ).strip()
+            if not recommendation_id:
+                continue
+            recommendation_results[recommendation_id] = {
+                "recommendation_id": recommendation_id,
+                "actor_key": recommendation.get("actor_key"),
+                "status": "healthy",
+                "rules": [],
+            }
+            for rule in recommendation.get("enforcement_rules") or []:
+                if not isinstance(rule, dict):
+                    continue
+                zone_id = str(rule.get("zone_id") or "").strip()
+                ref = str(rule.get("ref") or "").strip()
+                if not zone_id or not ref:
+                    recommendation_results[recommendation_id]["status"] = "drifted"
+                    recommendation_results[recommendation_id]["rules"].append(
+                        {
+                            "zone_id": zone_id or None,
+                            "ref": ref or None,
+                            "status": "drifted",
+                            "detail": "persisted rule metadata is incomplete",
+                        }
+                    )
+                    continue
+                expected_by_zone.setdefault(zone_id, []).append(
+                    {
+                        "recommendation_id": recommendation_id,
+                        "zone_id": zone_id,
+                        "ruleset_id": str(rule.get("ruleset_id") or ""),
+                        "rule_id": str(rule.get("rule_id") or ""),
+                        "ref": ref,
+                        "action": str(rule.get("action") or ""),
+                        "expression": str(rule.get("expression") or ""),
+                    }
+                )
+
+        zones = sorted(configured_zones | set(expected_by_zone))
+        orphans: list[dict[str, Any]] = []
+        zone_errors: list[dict[str, Any]] = []
+        status_rank = {"healthy": 0, "drifted": 1, "missing": 2, "error": 3}
+
+        def mark_rule(expected: dict[str, Any], status: str, detail: str) -> None:
+            recommendation_id = expected["recommendation_id"]
+            result = recommendation_results[recommendation_id]
+            if status_rank[status] > status_rank[result["status"]]:
+                result["status"] = status
+            result["rules"].append(
+                {
+                    "zone_id": expected["zone_id"],
+                    "ref": expected["ref"],
+                    "expected_rule_id": expected["rule_id"],
+                    "status": status,
+                    "detail": detail,
+                }
+            )
+
+        for zone_id in zones:
+            expected_rules = expected_by_zone.get(zone_id, [])
+            expected_refs = {value["ref"] for value in expected_rules}
+            try:
+                inspected = await self.inspect_zone(zone_id)
+            except Exception as exc:
+                message = f"{type(exc).__name__}: {exc}"
+                zone_errors.append({"zone_id": zone_id, "error": message})
+                for expected in expected_rules:
+                    mark_rule(expected, "error", message)
+                continue
+
+            observed_rules = list(inspected.get("rules") or [])
+            observed_by_ref = {
+                str(rule.get("ref") or ""): rule
+                for rule in observed_rules
+                if str(rule.get("ref") or "")
+            }
+            for expected in expected_rules:
+                observed = observed_by_ref.get(expected["ref"])
+                if observed is None:
+                    detail = (
+                        "custom WAF entrypoint is missing"
+                        if not inspected.get("entrypoint_exists")
+                        else "expected Hotpot rule was not found"
+                    )
+                    mark_rule(expected, "missing", detail)
+                    continue
+
+                differences: list[str] = []
+                if expected["rule_id"] and str(observed.get("id") or "") != expected["rule_id"]:
+                    differences.append("rule id changed")
+                if expected["ruleset_id"] and str(inspected.get("ruleset_id") or "") != expected["ruleset_id"]:
+                    differences.append("ruleset id changed")
+                if expected["action"] and str(observed.get("action") or "") != expected["action"]:
+                    differences.append("action changed")
+                if expected["expression"] and str(observed.get("expression") or "") != expected["expression"]:
+                    differences.append("expression changed")
+                if observed.get("enabled") is False:
+                    differences.append("rule disabled")
+                if differences:
+                    mark_rule(expected, "drifted", "; ".join(differences))
+                else:
+                    mark_rule(expected, "healthy", "matches persisted Hotpot rule")
+
+            for observed in observed_rules:
+                ref = str(observed.get("ref") or "")
+                if not ref.startswith("hotpot_") or ref in expected_refs:
+                    continue
+                orphans.append(
+                    {
+                        "zone_id": zone_id,
+                        "ruleset_id": inspected.get("ruleset_id"),
+                        "rule_id": observed.get("id"),
+                        "ref": ref,
+                        "action": observed.get("action"),
+                        "expression": observed.get("expression"),
+                        "enabled": observed.get("enabled", True),
+                        "description": observed.get("description"),
+                    }
+                )
+
+        values = list(recommendation_results.values())
+        counts = {
+            status: sum(1 for value in values if value["status"] == status)
+            for status in ("healthy", "drifted", "missing", "error")
+        }
+        overall = "healthy"
+        if zone_errors:
+            overall = "error"
+        elif counts["missing"] or counts["drifted"] or orphans:
+            overall = "drifted"
+        return {
+            "checked_at": checked_at,
+            "status": overall,
+            "recommendations": values,
+            "counts": counts,
+            "orphans": orphans,
+            "orphaned": len(orphans),
+            "zone_errors": zone_errors,
+            "zones_checked": len(zones),
+        }
