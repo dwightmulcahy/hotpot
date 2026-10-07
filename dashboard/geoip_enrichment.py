@@ -17,7 +17,9 @@ except ImportError:  # pragma: no cover
 
 
 class GeoIPEnricher:
-    """Optional local MaxMind MMDB enrichment with automatic file reloads."""
+    """Optional local MaxMind MMDB enrichment with resilient file reloads."""
+
+    EMPTY_SIGNATURE = (False, 0, 0)
 
     def __init__(self, *, asn_db=None, country_db=None, city_db=None) -> None:
         self.asn_path = self._path(
@@ -34,17 +36,36 @@ class GeoIPEnricher:
         self.errors: list[str] = []
         self.asn_reader = self.country_reader = self.city_reader = None
         self.reload_count = 0
+        self.reload_failure_count = 0
         self.last_reload_at: str | None = None
-        self._signatures: dict[str, tuple[bool, int, int]] = {}
+        self.last_reload_error_at: str | None = None
+        # _signatures represents the files actually accepted by the live readers,
+        # not merely files observed on disk. A bad replacement therefore remains
+        # different and is retried on the next refresh.
+        self._signatures: dict[str, tuple[bool, int, int]] = {
+            "asn": self.EMPTY_SIGNATURE,
+            "country": self.EMPTY_SIGNATURE,
+            "city": self.EMPTY_SIGNATURE,
+        }
         if geoip2 is None:
             self.errors.append("geoip2 package is unavailable")
             return
+
         self.asn_reader = self._open(self.asn_path, "asn")
         self.country_reader = self._open(self.country_path, "country")
         self.city_reader = self._open(self.city_path, "city")
-        self._signatures = self._current_signatures()
+        current = self._current_signatures()
+        for label, path, reader in (
+            ("asn", self.asn_path, self.asn_reader),
+            ("country", self.country_path, self.country_reader),
+            ("city", self.city_path, self.city_reader),
+        ):
+            if path is None or reader is not None:
+                self._signatures[label] = current[label]
         if self.enabled:
             self.last_reload_at = datetime.now(timezone.utc).isoformat()
+        if self.errors:
+            self.last_reload_error_at = datetime.now(timezone.utc).isoformat()
 
     @staticmethod
     def _path(value) -> Path | None:
@@ -77,7 +98,9 @@ class GeoIPEnricher:
         return "|".join(parts) or "geoip-unconfigured"
 
     def revision(self) -> str:
-        return self._revision_for(self._current_signatures())
+        """Return the revision represented by the currently loaded readers."""
+
+        return self._revision_for(self._signatures)
 
     @staticmethod
     def _database_status(sig: tuple[bool, int, int]) -> dict[str, Any]:
@@ -124,12 +147,13 @@ class GeoIPEnricher:
         return any((self.asn_reader, self.country_reader, self.city_reader))
 
     def reload_if_changed(self) -> bool:
-        """Reload MMDB readers when geoipupdate replaces a database on disk.
+        """Reload changed MMDB files without acknowledging failed replacements.
 
-        The dashboard calls this on its normal refresh interval. New readers are
-        opened before old readers are closed so a bad/incomplete replacement does
-        not discard a working database. Successful reloads also clear the IP lookup
-        cache so subsequent dashboard data uses the new database immediately.
+        Readers are opened before old readers are closed. If a replacement is
+        incomplete/corrupt, the working reader and its accepted signature remain
+        active. Because the bad on-disk signature is not recorded as accepted, the
+        exact same file is retried on every normal dashboard refresh until it can be
+        opened or is replaced again.
         """
 
         if geoip2 is None:
@@ -140,22 +164,26 @@ class GeoIPEnricher:
 
         changed = False
         new_errors: list[str] = []
+        accepted = dict(self._signatures)
+        failure_count = 0
         specs = (
             ("asn", self.asn_path, "asn_reader"),
             ("country", self.country_path, "country_reader"),
             ("city", self.city_path, "city_reader"),
         )
         for label, path, attr in specs:
-            if current[label] == self._signatures.get(label):
+            if current[label] == accepted.get(label, self.EMPTY_SIGNATURE):
                 continue
             old_reader = getattr(self, attr)
             if path is None:
                 self._close_reader(old_reader)
                 setattr(self, attr, None)
+                accepted[label] = current[label]
                 changed = True
                 continue
             if not path.is_file():
                 new_errors.append(f"{label} database not found: {path}")
+                failure_count += 1
                 continue
             try:
                 new_reader = geoip2.database.Reader(str(path))  # type: ignore[union-attr]
@@ -163,16 +191,19 @@ class GeoIPEnricher:
                 new_errors.append(
                     f"{label} database reload failed: {type(exc).__name__}"
                 )
+                failure_count += 1
                 continue
+
             setattr(self, attr, new_reader)
             self._close_reader(old_reader)
+            accepted[label] = current[label]
             changed = True
 
-        # Remember the observed files even if one could not be opened; another file
-        # replacement changes the signature and triggers a new attempt. A failed file
-        # remains represented in status while the previously working reader stays live.
-        self._signatures = current
+        self._signatures = accepted
         self.errors = new_errors
+        if failure_count:
+            self.reload_failure_count += failure_count
+            self.last_reload_error_at = datetime.now(timezone.utc).isoformat()
         if changed:
             self.lookup.cache_clear()
             self.reload_count += 1
@@ -180,10 +211,18 @@ class GeoIPEnricher:
         return changed
 
     def status(self) -> dict[str, Any]:
-        signatures = self._current_signatures()
+        observed = self._current_signatures()
         databases = {
-            name: self._database_status(sig) for name, sig in signatures.items()
+            name: self._database_status(sig) for name, sig in observed.items()
         }
+        for name, info in databases.items():
+            loaded = self._signatures.get(name, self.EMPTY_SIGNATURE)
+            info["loaded_signature"] = {
+                "present": loaded[0],
+                "mtime_ns": loaded[1],
+                "size": loaded[2],
+            }
+            info["reload_pending"] = observed[name] != loaded
         ages = [
             int(info["age_seconds"])
             for info in databases.values()
@@ -196,8 +235,12 @@ class GeoIPEnricher:
             "country_loaded": self.country_reader is not None,
             "city_loaded": self.city_reader is not None,
             "reload_count": self.reload_count,
+            "reload_failure_count": self.reload_failure_count,
             "last_reload_at": self.last_reload_at,
-            "revision": self._revision_for(signatures),
+            "last_reload_error_at": self.last_reload_error_at,
+            "revision": self.revision(),
+            "observed_revision": self._revision_for(observed),
+            "reload_pending": observed != self._signatures,
             "oldest_database_age_seconds": max(ages) if ages else None,
             "newest_database_age_seconds": min(ages) if ages else None,
             "databases": databases,
