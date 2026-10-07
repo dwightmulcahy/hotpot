@@ -77,7 +77,11 @@ class GeoIPEnrichmentTests(unittest.TestCase):
                 "city": (False, 0, 0),
             }
 
-            with patch.object(geoip_module.geoip2.database, "Reader", return_value=FakeASNReader()):
+            with patch.object(
+                geoip_module.geoip2.database,
+                "Reader",
+                return_value=FakeASNReader(),
+            ):
                 self.assertTrue(enricher.reload_if_changed())
 
         second = enricher.lookup("8.8.8.8")
@@ -85,6 +89,33 @@ class GeoIPEnrichmentTests(unittest.TestCase):
         self.assertEqual(second["asn"], 24940)
         self.assertEqual(enricher.reload_count, 1)
         self.assertIsNotNone(enricher.last_reload_at)
+
+    def test_status_exposes_database_age_and_revision(self):
+        if geoip_module.geoip2 is None:
+            self.skipTest("geoip2 dependency unavailable")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "GeoLite2-ASN.mmdb"
+            db_path.write_bytes(b"fake-mmdb")
+            with patch.object(
+                geoip_module.geoip2.database,
+                "Reader",
+                return_value=FakeASNReader(),
+            ):
+                enricher = GeoIPEnricher(
+                    asn_db=db_path,
+                    country_db="",
+                    city_db="",
+                )
+            status = enricher.status()
+            self.assertTrue(status["enabled"])
+            self.assertTrue(status["asn_loaded"])
+            self.assertIsNotNone(status["databases"]["asn"]["mtime_at"])
+            self.assertIsNotNone(status["databases"]["asn"]["age_seconds"])
+            self.assertGreater(status["databases"]["asn"]["size"], 0)
+            self.assertEqual(status["revision"], enricher.revision())
+            self.assertIsNotNone(status["oldest_database_age_seconds"])
+            enricher.close()
 
 
 if __name__ == "__main__":
