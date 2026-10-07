@@ -105,6 +105,9 @@ class DashboardProductionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("from .template import PRODUCTION_HTML", production)
         self.assertIn("api_approve_recommendation", production)
         self.assertIn("api_remove_enforcement", production)
+        self.assertIn("api_reconcile_enforcement", production)
+        self.assertIn("api_system_check", production)
+        self.assertIn("api_audit", production)
 
     def test_dashboard_html_uses_command_center_navigation_and_threat_drawer(self) -> None:
         self.assertIn("Security overview", PRODUCTION_HTML)
@@ -114,10 +117,19 @@ class DashboardProductionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('data-view="network"', PRODUCTION_HTML)
         self.assertIn('data-view="operations"', PRODUCTION_HTML)
         self.assertIn("Needs your attention", PRODUCTION_HTML)
-        self.assertIn("Recent response history", PRODUCTION_HTML)
+        self.assertIn("Enforcement audit trail", PRODUCTION_HTML)
+        self.assertIn("Cloudflare reconciliation", PRODUCTION_HTML)
+        self.assertIn("Reconcile now", PRODUCTION_HTML)
+        self.assertIn("System self-test", PRODUCTION_HTML)
+        self.assertIn("Run system check", PRODUCTION_HTML)
         self.assertIn("Threat investigation", PRODUCTION_HTML)
         self.assertIn("/api/attacker?key=", PRODUCTION_HTML)
+        self.assertIn("/api/audit?limit=80", PRODUCTION_HTML)
+        self.assertIn("/api/enforcement/reconcile", PRODUCTION_HTML)
+        self.assertIn("/api/system-check", PRODUCTION_HTML)
         self.assertIn("data-open-threat", PRODUCTION_HTML)
+        self.assertIn("data-expires-at", PRODUCTION_HTML)
+        self.assertIn("updateCountdowns", PRODUCTION_HTML)
 
     def test_dashboard_image_copies_server_header_hardening(self) -> None:
         root = Path(__file__).resolve().parents[1]
