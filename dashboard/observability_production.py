@@ -3,18 +3,17 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any
 
 from aiohttp import web
 
 from . import runtime as core
-from .investigation_store import InvestigationStore
-from .notifications import NotificationCenter, NotificationConfig
+from .alerting_runtime import AlertingInvestigationStore, AlertNotificationCenter
+from .notifications import NotificationConfig
 from .secure_production import SecureProductionDashboard
 
 
 EXTRA_CSS = r'''
-.timeline{position:relative;margin-top:4px;padding-left:18px}.timeline:before{content:"";position:absolute;left:5px;top:5px;bottom:5px;width:1px;background:var(--line)}.timeline-item{position:relative;padding:0 0 14px 12px}.timeline-item:last-child{padding-bottom:0}.timeline-dot{position:absolute;left:-17px;top:5px;width:9px;height:9px;border:2px solid var(--surface);border-radius:50%;background:var(--muted)}.timeline-item.probe .timeline-dot{background:var(--info)}.timeline-item.escalation .timeline-dot{background:var(--warn)}.timeline-item.approval .timeline-dot,.timeline-item.enforcement .timeline-dot{background:var(--good)}.timeline-item.audit .timeline-dot{background:var(--muted)}.timeline-time{font-size:10px;color:var(--faint);text-transform:uppercase;letter-spacing:.04em}.timeline-title{font-weight:680;margin-top:2px}.timeline-detail{font-size:11px;color:var(--muted);margin-top:2px;overflow-wrap:anywhere}.timeline-principal{font-size:10px;color:var(--faint);margin-top:3px}.notify-row{display:grid;grid-template-columns:92px minmax(180px,.75fr) minmax(260px,1.4fr) 120px;gap:10px;padding:9px 0;border-bottom:1px solid var(--line-soft);font-size:12px}.notify-row:last-child{border-bottom:0}.notify-subject{font-weight:650;overflow-wrap:anywhere}.notify-message{color:var(--muted);overflow-wrap:anywhere}.badge.critical{color:var(--bad);border-color:#66353b;background:var(--bad-bg)}.badge.info{color:var(--info);border-color:#365272;background:var(--info-bg)}.badge.sent{color:var(--good);border-color:#2e5547;background:var(--good-bg)}.badge.recorded{color:var(--muted)}.badge.failed{color:var(--bad);border-color:#66353b;background:var(--bad-bg)}@media(max-width:720px){.notify-row{grid-template-columns:90px 1fr}.notify-row>:nth-child(3),.notify-row>:nth-child(4){display:none}}
+.timeline{position:relative;margin-top:4px;padding-left:18px}.timeline:before{content:"";position:absolute;left:5px;top:5px;bottom:5px;width:1px;background:var(--line)}.timeline-item{position:relative;padding:0 0 14px 12px}.timeline-item:last-child{padding-bottom:0}.timeline-dot{position:absolute;left:-17px;top:5px;width:9px;height:9px;border:2px solid var(--surface);border-radius:50%;background:var(--muted)}.timeline-item.probe .timeline-dot{background:var(--info)}.timeline-item.escalation .timeline-dot{background:var(--warn)}.timeline-item.recommendation .timeline-dot{background:var(--warn)}.timeline-item.approval .timeline-dot,.timeline-item.enforcement .timeline-dot{background:var(--good)}.timeline-item.audit .timeline-dot{background:var(--muted)}.timeline-time{font-size:10px;color:var(--faint);text-transform:uppercase;letter-spacing:.04em}.timeline-title{font-weight:680;margin-top:2px}.timeline-detail{font-size:11px;color:var(--muted);margin-top:2px;overflow-wrap:anywhere}.timeline-principal{font-size:10px;color:var(--faint);margin-top:3px}.notify-row{display:grid;grid-template-columns:92px minmax(180px,.75fr) minmax(260px,1.4fr) 120px;gap:10px;padding:9px 0;border-bottom:1px solid var(--line-soft);font-size:12px}.notify-row:last-child{border-bottom:0}.notify-subject{font-weight:650;overflow-wrap:anywhere}.notify-message{color:var(--muted);overflow-wrap:anywhere}.badge.critical{color:var(--bad);border-color:#66353b;background:var(--bad-bg)}.badge.info{color:var(--info);border-color:#365272;background:var(--info-bg)}.badge.sent{color:var(--good);border-color:#2e5547;background:var(--good-bg)}.badge.recorded{color:var(--muted)}.badge.failed{color:var(--bad);border-color:#66353b;background:var(--bad-bg)}@media(max-width:720px){.notify-row{grid-template-columns:90px 1fr}.notify-row>:nth-child(3),.notify-row>:nth-child(4){display:none}}
 '''
 
 
@@ -73,12 +72,14 @@ class ObservabilityDashboard(SecureProductionDashboard):
 
     def __init__(self) -> None:
         super().__init__()
-        self.store = InvestigationStore(
+        self.store = AlertingInvestigationStore(
             Path(os.getenv("HOTPOT_DASHBOARD_DATA_DIR", "/data")),
             retention_days=self.retention_days,
         )
         self.notification_config = NotificationConfig.from_env()
-        self.notifications = NotificationCenter(self.notification_config, self.store)
+        self.notifications = AlertNotificationCenter(
+            self.notification_config, self.store
+        )
         self.notification_processing_errors = 0
 
     async def refresh(self) -> None:
