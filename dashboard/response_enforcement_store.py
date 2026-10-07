@@ -100,6 +100,37 @@ class EnforcementStore(ThreatResponseStore):
                 continue
         return False
 
+    def _sync_response_recommendations_sync(
+        self,
+        policy: ResponsePolicy,
+        apps: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        # Let the recommendation engine evaluate current activity first, then remove
+        # any fresh duplicate pending recommendation for an actor whose explicitly
+        # approved Cloudflare action is still being applied or is already active.
+        super()._sync_response_recommendations_sync(policy, apps)
+        now_iso = datetime.now(timezone.utc).isoformat()
+        conn = self._connect()
+        try:
+            conn.execute(
+                """
+                UPDATE response_recommendations AS pending
+                SET status = 'expired', updated_at = ?
+                WHERE pending.status = 'pending'
+                  AND EXISTS (
+                      SELECT 1 FROM response_recommendations AS active
+                      WHERE active.actor_key = pending.actor_key
+                        AND active.recommendation_id != pending.recommendation_id
+                        AND active.status IN ('approved', 'applied')
+                  )
+                """,
+                (now_iso,),
+            )
+            conn.commit()
+            return self._response_snapshot_conn(conn, policy)
+        finally:
+            conn.close()
+
     async def approve_recommendation(
         self,
         recommendation_id: str,
@@ -153,7 +184,9 @@ class EnforcementStore(ThreatResponseStore):
             if action not in ENFORCEABLE_ACTIONS:
                 reason = "; ".join(decision.get("safety_reasons") or [])
                 detail = f": {reason}" if reason else ""
-                raise ValueError(f"current policy no longer permits enforcement{detail}")
+                raise ValueError(
+                    f"current policy no longer permits enforcement{detail}"
+                )
             if ACTION_RANK.get(action, 0) < ACTION_RANK["recommend_challenge"]:
                 raise ValueError("current policy no longer permits enforcement")
 
@@ -176,16 +209,22 @@ class EnforcementStore(ThreatResponseStore):
                 (actor_key, cutoff),
             ).fetchall()
             if not app_rows:
-                raise ValueError("no active protected applications remain for this actor")
+                raise ValueError(
+                    "no active protected applications remain for this actor"
+                )
 
             evidence = dict(decision["evidence"])
-            evidence["instance_ids"] = [str(value["instance_id"]) for value in app_rows]
+            evidence["instance_ids"] = [
+                str(value["instance_id"]) for value in app_rows
+            ]
             evidence["app_activity"] = [dict(value) for value in app_rows]
             evidence_json = json.dumps(
                 evidence, separators=(",", ":"), sort_keys=True
             )
             duration_hours = max(1, int(decision["duration_hours"] or 1))
-            enforcement_expires_at = (now + timedelta(hours=duration_hours)).isoformat()
+            enforcement_expires_at = (
+                now + timedelta(hours=duration_hours)
+            ).isoformat()
             conn.execute(
                 """
                 UPDATE response_recommendations
@@ -217,17 +256,26 @@ class EnforcementStore(ThreatResponseStore):
                 "SELECT * FROM response_recommendations WHERE recommendation_id = ?",
                 (recommendation_id,),
             ).fetchone()
-            return self._recommendation_from_row(updated) if updated is not None else None
+            return (
+                self._recommendation_from_row(updated)
+                if updated is not None
+                else None
+            )
         finally:
             conn.close()
 
-    async def approved_recommendations(self, limit: int = 20) -> list[dict[str, Any]]:
+    async def approved_recommendations(
+        self, limit: int = 20
+    ) -> list[dict[str, Any]]:
         async with self.lock:
             return await asyncio.to_thread(
-                self._approved_recommendations_sync, max(1, min(100, int(limit)))
+                self._approved_recommendations_sync,
+                max(1, min(100, int(limit))),
             )
 
-    def _approved_recommendations_sync(self, limit: int) -> list[dict[str, Any]]:
+    def _approved_recommendations_sync(
+        self, limit: int
+    ) -> list[dict[str, Any]]:
         conn = self._connect()
         try:
             rows = conn.execute(
@@ -263,7 +311,9 @@ class EnforcementStore(ThreatResponseStore):
                 (
                     now,
                     now,
-                    json.dumps(rules, separators=(",", ":"), sort_keys=True),
+                    json.dumps(
+                        rules, separators=(",", ":"), sort_keys=True
+                    ),
                     recommendation_id,
                 ),
             )
@@ -336,7 +386,9 @@ class EnforcementStore(ThreatResponseStore):
     ) -> dict[str, Any] | None:
         async with self.lock:
             return await asyncio.to_thread(
-                self._mark_removal_result_sync, recommendation_id, errors
+                self._mark_removal_result_sync,
+                recommendation_id,
+                errors,
             )
 
     def _mark_removal_result_sync(
@@ -399,7 +451,9 @@ class EnforcementStore(ThreatResponseStore):
                 GROUP BY status
                 """
             ).fetchall()
-            counts = {str(row["status"]): int(row["count"] or 0) for row in rows}
+            counts = {
+                str(row["status"]): int(row["count"] or 0) for row in rows
+            }
             overdue = conn.execute(
                 """
                 SELECT COUNT(*) FROM response_recommendations
