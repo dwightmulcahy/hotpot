@@ -30,7 +30,7 @@ class DashboardProductionTests(unittest.IsolatedAsyncioTestCase):
         ):
             return ProductionDashboard()
 
-    async def test_collect_status_exposes_build_and_suppression_with_one_fetch(self) -> None:
+    async def test_collect_status_exposes_build_suppression_and_safety_with_one_fetch(self) -> None:
         dashboard = self.make_dashboard()
         calls = []
 
@@ -46,6 +46,8 @@ class DashboardProductionTests(unittest.IsolatedAsyncioTestCase):
                 "build_date": "2026-10-06T16:00:00Z",
                 "source_id": "source-one",
                 "event_cursor_max": 44,
+                "allowlist": {"cidrs": ["10.0.0.0/8"]},
+                "client_ip": {"trusted_proxy_cidrs": ["127.0.0.1/32"]},
                 "stats": {
                     "tarpits_active": 1,
                     "tarpits_total": 4,
@@ -69,12 +71,17 @@ class DashboardProductionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["source_id"], "source-one")
         self.assertEqual(row["event_cursor_max"], 44)
         self.assertEqual(row["upstream_health"]["probe_method"], "HEAD")
+        self.assertEqual(row["allowlist_cidrs"], ["10.0.0.0/8"])
+        self.assertEqual(row["trusted_proxy_cidrs"], ["127.0.0.1/32"])
 
-    def test_dashboard_html_surfaces_operations_without_string_rewrite(self) -> None:
+    def test_dashboard_html_surfaces_operations_and_response_without_string_rewrite(self) -> None:
         self.assertIn("Suppressed", PRODUCTION_HTML)
         self.assertIn("Top networks / ASNs", PRODUCTION_HTML)
         self.assertIn("Operational health", PRODUCTION_HTML)
         self.assertIn("GeoIP / attribution", PRODUCTION_HTML)
+        self.assertIn("Response recommendations", PRODUCTION_HTML)
+        self.assertIn("Pending response", PRODUCTION_HTML)
+        self.assertIn("/api/recommendation/", PRODUCTION_HTML)
         self.assertIn("Backlog", PRODUCTION_HTML)
         root = Path(__file__).resolve().parents[1]
         production = (root / "dashboard" / "production.py").read_text(encoding="utf-8")
