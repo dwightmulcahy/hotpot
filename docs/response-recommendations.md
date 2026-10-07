@@ -61,6 +61,8 @@ A successful approval triggers an immediate reconciliation so the dashboard can 
 
 Enforcement lifecycle events are written to the additive `response_audit_log` table in `dashboard.sqlite3`. The audit trail records recommendation creation, approval, apply success/failure, manual or automatic removal, removal failures, reconciliation issues/resolution, and orphan detection/resolution.
 
+Dashboard-triggered actions also record the authenticated Basic username, signed dashboard session ID, and `source=dashboard`. Automatic lifecycle activity remains `source=system`. This makes manual approvals/removals/reconciliation distinguishable from background processing.
+
 Audit entries store timestamps, recommendation/actor references where applicable, a human-readable message, and bounded JSON details such as Cloudflare rule identifiers. Repeated reconciliation checks do not continuously duplicate the same issue in the audit log; a new audit event is written when the reconciliation state changes.
 
 The Enforcement tab reads the permanent audit trail from `/api/audit` instead of reconstructing history from current recommendation states.
@@ -91,13 +93,24 @@ Actions map as follows:
 
 IP actors use an `ip.src` expression. Known Cloudflare Worker actors use `cf.worker.upstream_zone`. Hotpot never uses country, provider, or ASN as an enforcement selector.
 
-The API token should be restricted to the required zones and have **Zone WAF Write** permission. Keep it only in the dashboard environment; never put it in the repository.
+The API token should be restricted to the required zones and have **Zone WAF Write** permission. Keep it only in the dashboard environment or use `HOTPOT_CLOUDFLARE_API_TOKEN_FILE`; never put it in the repository.
+
+## Dashboard action security
+
+The initial dashboard login remains HTTP Basic for compatibility. Loading the dashboard issues a signed, expiring session cookie plus a per-session CSRF token. Read-only APIs accept either the signed session or the existing Basic credentials.
+
+State-changing endpoints require:
+
+1. a current signed dashboard session cookie
+2. the matching `X-Hotpot-CSRF` token
+3. the expected `X-Hotpot-Action` header
+
+The browser dashboard supplies the CSRF token automatically. Mutation requests are rate-limited per session. Reload the dashboard to renew an expired session. See `docs/dashboard-security.md` for `_FILE` secret support and session settings.
 
 ## API
 
-All response endpoints require the dashboard's existing HTTP Basic authentication. State-changing endpoints also require an explicit `X-Hotpot-Action` header.
-
 ```text
+GET  /api/session
 GET  /api/recommendations
 GET  /api/recommendations?status=applied
 GET  /api/recommendations?status=failed
@@ -107,18 +120,23 @@ GET  /api/audit?recommendation_id=<recommendation_id>&limit=100
 
 POST /api/recommendation/<recommendation_id>/dismiss
      X-Hotpot-Action: dismiss
+     X-Hotpot-CSRF: <session csrf token>
 
 POST /api/recommendation/<recommendation_id>/approve
      X-Hotpot-Action: approve
+     X-Hotpot-CSRF: <session csrf token>
 
 POST /api/recommendation/<recommendation_id>/remove
      X-Hotpot-Action: remove
+     X-Hotpot-CSRF: <session csrf token>
 
 POST /api/enforcement/reconcile
      X-Hotpot-Action: reconcile
+     X-Hotpot-CSRF: <session csrf token>
 
 POST /api/system-check
      X-Hotpot-Action: system-check
+     X-Hotpot-CSRF: <session csrf token>
 ```
 
 There is no automatic approval endpoint. Hotpot will automatically **remove** an already approved/applied rule at expiry, but it will not automatically approve or create a new enforcement rule. Reconciliation is detection-only; it does not automatically repair drift or remove orphaned rules.
@@ -140,6 +158,7 @@ Cloudflare enforcement is opt-in and disabled by default:
 ```dotenv
 HOTPOT_CLOUDFLARE_ENFORCEMENT_ENABLED=false
 HOTPOT_CLOUDFLARE_API_TOKEN=REPLACE_WITH_ZONE_WAF_WRITE_TOKEN
+# or HOTPOT_CLOUDFLARE_API_TOKEN_FILE=/run/secrets/cloudflare_api_token
 HOTPOT_CLOUDFLARE_RECONCILE_SECONDS=300
 HOTPOT_CLOUDFLARE_TARGETS={"monkeyhead":{"zone_id":"ZONE_ID","hosts":["www.monkeyheadbrewing.com"]},"watersolver":{"zone_id":"ZONE_ID","hosts":["brewwatersolver.com","www.brewwatersolver.com"]},"hvac":{"zone_id":"ZONE_ID","hosts":["hvac.bytemeloser.com"]},"tapmenu":{"zone_id":"ZONE_ID","hosts":["tapmenu.bytemeloser.com"]}}
 ```
@@ -152,4 +171,4 @@ Enable enforcement only after the token and target mapping are complete:
 HOTPOT_CLOUDFLARE_ENFORCEMENT_ENABLED=true
 ```
 
-No database reset is required. All reconciliation and audit migrations are additive.
+No database reset is required. All reconciliation, audit, and dashboard-security migrations are additive.
