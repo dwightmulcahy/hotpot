@@ -10,8 +10,15 @@ from aiohttp import web
 
 from . import runtime as core
 from .geoip_enrichment import GeoIPEnricher
-from .network_intelligence import NetworkIntelligenceStore
+from .response_recommendations import ResponsePolicy, ThreatResponseStore
 from .template import PRODUCTION_HTML
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 class ProductionDashboard(core.Dashboard):
@@ -32,9 +39,24 @@ class ProductionDashboard(core.Dashboard):
                 int(os.getenv("HOTPOT_DASHBOARD_GEOIP_ENRICH_BATCH", "500")),
             ),
         )
+        self.response_policy = ResponsePolicy(
+            enabled=_env_bool("HOTPOT_RESPONSE_ENABLED", True),
+            active_window_hours=max(
+                1, int(os.getenv("HOTPOT_RESPONSE_ACTIVE_WINDOW_HOURS", "24"))
+            ),
+            stale_minutes=max(
+                15, int(os.getenv("HOTPOT_RESPONSE_STALE_MINUTES", "360"))
+            ),
+            recommendation_ttl_hours=max(
+                1, int(os.getenv("HOTPOT_RESPONSE_RECOMMENDATION_TTL_HOURS", "24"))
+            ),
+            dismiss_hours=max(
+                1, int(os.getenv("HOTPOT_RESPONSE_DISMISS_HOURS", "24"))
+            ),
+        )
         self._last_housekeeping = 0.0
         self.maintenance_errors = 0
-        self.store = NetworkIntelligenceStore(
+        self.store = ThreatResponseStore(
             Path(os.getenv("HOTPOT_DASHBOARD_DATA_DIR", "/data")),
             retention_days=self.retention_days,
         )
@@ -65,6 +87,8 @@ class ProductionDashboard(core.Dashboard):
             "build_date": "unknown",
             "source_id": None,
             "event_cursor_max": 0,
+            "allowlist_cidrs": [],
+            "trusted_proxy_cidrs": [],
         }
 
     async def collect_status(self, instance) -> dict[str, Any]:
@@ -79,6 +103,8 @@ class ProductionDashboard(core.Dashboard):
         upstream_health = (
             status.get("upstream_health", {}) if isinstance(status, dict) else {}
         )
+        client_ip = status.get("client_ip", {}) if isinstance(status, dict) else {}
+        allowlist = status.get("allowlist", {}) if isinstance(status, dict) else {}
         return {
             "id": instance.instance_id,
             "name": instance.name,
@@ -100,6 +126,8 @@ class ProductionDashboard(core.Dashboard):
             "build_date": str(status.get("build_date", "unknown")),
             "source_id": status.get("source_id"),
             "event_cursor_max": int(status.get("event_cursor_max", 0) or 0),
+            "allowlist_cidrs": list(allowlist.get("cidrs") or []),
+            "trusted_proxy_cidrs": list(client_ip.get("trusted_proxy_cidrs") or []),
         }
 
     async def collect_events(self, instance) -> None:
@@ -175,9 +203,6 @@ class ProductionDashboard(core.Dashboard):
                 "backlog_is_lower_bound": False,
             }
 
-        # The store intentionally caps candidate scans at 5000. If that cap is
-        # reached, report the backlog as a lower bound rather than pretending it is
-        # an exact count. Normal installations will quickly fall below the cap.
         backlog_scan = await self.store.network_enrichment_candidates(revision, 5000)
         candidates = backlog_scan[: self.geoip_enrich_batch]
         records = [
@@ -224,9 +249,18 @@ class ProductionDashboard(core.Dashboard):
         await self._maybe_housekeep()
         self.geoip.reload_if_changed()
         attribution = await self._persist_network_attribution()
+        response = await self.store.sync_response_recommendations(
+            self.response_policy, list(apps)
+        )
         snapshot = await self.store.snapshot(list(apps))
         snapshot["summary"]["suppressed_events"] = sum(
             int(app.get("events_suppressed", 0) or 0) for app in apps
+        )
+        snapshot["summary"]["response_pending"] = int(
+            response.get("summary", {}).get("pending", 0) or 0
+        )
+        snapshot["summary"]["response_high_priority"] = int(
+            response.get("summary", {}).get("high_priority", 0) or 0
         )
         snapshot["top_offenders"] = [
             self.enrich_attacker(row) for row in snapshot.get("top_offenders", [])
@@ -247,11 +281,28 @@ class ProductionDashboard(core.Dashboard):
         geoip_status["attribution"] = attribution
         snapshot["geoip"] = geoip_status
         snapshot["network_attribution"] = attribution
+        snapshot["response"] = response
         snapshot.setdefault("database", {})[
             "maintenance_errors"
         ] = self.maintenance_errors
         async with self.cache_lock:
             self.cache = snapshot
+
+    async def _refresh_response_cache(self) -> None:
+        async with self.cache_lock:
+            apps = list(self.cache.get("apps", []))
+        response = await self.store.sync_response_recommendations(
+            self.response_policy, apps
+        )
+        async with self.cache_lock:
+            self.cache["response"] = response
+            summary = self.cache.setdefault("summary", {})
+            summary["response_pending"] = int(
+                response.get("summary", {}).get("pending", 0) or 0
+            )
+            summary["response_high_priority"] = int(
+                response.get("summary", {}).get("high_priority", 0) or 0
+            )
 
     async def api_attacker(self, request: web.Request) -> web.Response:
         self.require_auth(request)
@@ -293,6 +344,43 @@ class ProductionDashboard(core.Dashboard):
             raise web.HTTPNotFound(text="network intelligence not found")
         return web.json_response(result, headers={"Cache-Control": "no-store"})
 
+    async def api_recommendations(self, request: web.Request) -> web.Response:
+        self.require_auth(request)
+        status = request.query.get("status", "pending").strip().lower() or "pending"
+        try:
+            limit = max(1, min(500, int(request.query.get("limit", "100"))))
+            result = await self.store.recommendations(
+                self.response_policy, status=status, limit=limit
+            )
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text=str(exc)) from exc
+        return web.json_response(result, headers={"Cache-Control": "no-store"})
+
+    async def api_recommendation(self, request: web.Request) -> web.Response:
+        self.require_auth(request)
+        recommendation_id = request.query.get("id", "").strip()
+        if not recommendation_id:
+            raise web.HTTPBadRequest(text="id query parameter is required")
+        result = await self.store.recommendation(recommendation_id)
+        if result is None:
+            raise web.HTTPNotFound(text="recommendation not found")
+        return web.json_response(result, headers={"Cache-Control": "no-store"})
+
+    async def api_dismiss_recommendation(self, request: web.Request) -> web.Response:
+        self.require_auth(request)
+        if request.headers.get("X-Hotpot-Action", "") != "dismiss":
+            raise web.HTTPBadRequest(text="X-Hotpot-Action: dismiss header is required")
+        recommendation_id = request.match_info.get("recommendation_id", "").strip()
+        if not recommendation_id:
+            raise web.HTTPBadRequest(text="recommendation id is required")
+        result = await self.store.dismiss_recommendation(
+            recommendation_id, self.response_policy.dismiss_hours
+        )
+        if result is None:
+            raise web.HTTPNotFound(text="recommendation not found")
+        await self._refresh_response_cache()
+        return web.json_response(result, headers={"Cache-Control": "no-store"})
+
     async def index(self, request: web.Request) -> web.Response:
         self.require_auth(request)
         return web.Response(
@@ -321,6 +409,12 @@ def build_app() -> web.Application:
     app.router.add_get("/api/overview", dashboard.api_overview)
     app.router.add_get("/api/attacker", dashboard.api_attacker)
     app.router.add_get("/api/network", dashboard.api_network)
+    app.router.add_get("/api/recommendations", dashboard.api_recommendations)
+    app.router.add_get("/api/recommendation", dashboard.api_recommendation)
+    app.router.add_post(
+        "/api/recommendation/{recommendation_id}/dismiss",
+        dashboard.api_dismiss_recommendation,
+    )
     return app
 
 

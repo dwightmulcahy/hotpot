@@ -72,8 +72,6 @@ class ProductionHotpot(HardenedHotpot):
         timeout = ClientTimeout(total=self.health_timeout)
         headers = None
         if method == "GET":
-            # Ask cooperative origins for only a byte range and, regardless of whether
-            # they honor it, read only a tiny prefix before releasing the response.
             headers = {"Range": f"bytes=0-{self.HEALTHCHECK_GET_BYTES - 1}"}
         async with self.client.request(
             method,
@@ -173,6 +171,23 @@ class ProductionHotpot(HardenedHotpot):
                     "burst": self.event_burst,
                     "state_ttl_seconds": self.event_state_ttl,
                 },
+                "allowlist": {"cidrs": self.settings.allow_cidrs},
+                "retention": {
+                    "events_days": self.settings.retention_days,
+                    "attackers_days": self.settings.attacker_retention_days,
+                    "housekeeping_interval_seconds": self.settings.housekeeping_interval_seconds,
+                },
+                "notifications": {
+                    "enabled": self.notifier.enabled,
+                    "min_level": self.settings.notify_min_level,
+                    "cooldown_seconds": self.settings.notify_cooldown_seconds,
+                    "webhook": bool(self.settings.notify_webhook_url),
+                    "email": bool(
+                        self.settings.smtp_host
+                        and self.settings.smtp_from
+                        and self.settings.smtp_to
+                    ),
+                },
             }
         )
         payload["stats"] = dict(self.stats)
@@ -182,8 +197,6 @@ class ProductionHotpot(HardenedHotpot):
         headers = core_app.clean_headers(request.headers)
         identity = self.client_identity(request)
 
-        # Never accept forwarding metadata from an untrusted TCP peer. The same
-        # trust boundary used for the client IP now also governs the original scheme.
         forwarded_proto = request.scheme
         if identity.trusted_proxy:
             candidate = request.headers.get("X-Forwarded-Proto", "").split(",", 1)[0].strip().lower()
