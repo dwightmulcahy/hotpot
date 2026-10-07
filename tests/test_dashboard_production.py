@@ -135,7 +135,10 @@ class DashboardProductionTests(unittest.IsolatedAsyncioTestCase):
         root = Path(__file__).resolve().parents[1]
         dockerfile = (root / "Dockerfile.dashboard").read_text(encoding="utf-8")
         self.assertIn("COPY sitecustomize.py ./sitecustomize.py", dockerfile)
-        self.assertIn('CMD ["python", "-m", "dashboard.secure_production"]', dockerfile)
+        self.assertIn(
+            'CMD ["python", "-m", "dashboard.observability_production"]',
+            dockerfile,
+        )
 
     def test_core_and_dashboard_dependency_sets_are_split(self) -> None:
         root = Path(__file__).resolve().parents[1]
