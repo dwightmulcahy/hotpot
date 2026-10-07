@@ -1,7 +1,8 @@
+import hmac
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
@@ -20,6 +21,7 @@ class ProductionHardeningTests(unittest.IsolatedAsyncioTestCase):
             body = await request.read()
             self.upstream_requests.append(
                 {
+                    "method": request.method,
                     "path": request.path_qs,
                     "host": request.headers.get("Host"),
                     "xff": request.headers.get("X-Forwarded-For"),
@@ -128,6 +130,44 @@ class ProductionHardeningTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(hotpot.stats["events_persisted_total"], 1)
         self.assertEqual(hotpot.stats["events_suppressed_total"], 1)
 
+    async def test_admin_auth_uses_constant_time_compare(self):
+        original = hmac.compare_digest
+        with patch("hotpot.production.hmac.compare_digest", wraps=original) as compare:
+            response = await self.client.get(
+                "/_hotpot/status",
+                headers={"Authorization": "Bearer test-secret"},
+            )
+        self.assertEqual(response.status, 200)
+        compare.assert_called()
+        self.assertEqual(compare.call_args.args, ("Bearer test-secret", "Bearer test-secret"))
+
+        denied = await self.client.get(
+            "/_hotpot/status",
+            headers={"Authorization": "Bearer wrong-secret"},
+        )
+        self.assertEqual(denied.status, 401)
+
+    async def test_readiness_prefers_head(self):
+        hotpot = self.server.app[HOTPOT_APP_KEY]
+        self.upstream_requests.clear()
+        await hotpot.check_upstream()
+        self.assertEqual(len(self.upstream_requests), 1)
+        self.assertEqual(self.upstream_requests[0]["method"], "HEAD")
+        self.assertEqual(hotpot.upstream_health["probe_method"], "HEAD")
+        self.assertEqual(hotpot.upstream_health["body_read_limit"], 0)
+
+    async def test_readiness_falls_back_to_bounded_get_when_head_unsupported(self):
+        hotpot = self.server.app[HOTPOT_APP_KEY]
+        with patch.object(
+            hotpot, "_probe_upstream", new=AsyncMock(side_effect=[405, 200])
+        ) as probe:
+            await hotpot.check_upstream()
+        self.assertEqual(probe.await_args_list[0].args, ("HEAD",))
+        self.assertEqual(probe.await_args_list[1].args, ("GET",))
+        self.assertTrue(hotpot.upstream_health["healthy"])
+        self.assertEqual(hotpot.upstream_health["probe_method"], "GET")
+        self.assertEqual(hotpot.upstream_health["body_read_limit"], 1024)
+
     async def test_status_exposes_build_identity_and_hardening_policy(self):
         response = await self.client.get(
             "/_hotpot/status",
@@ -140,6 +180,7 @@ class ProductionHardeningTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(payload["proxy"]["preserve_host"])
         self.assertEqual(payload["proxy"]["max_request_body"], 32)
         self.assertEqual(payload["event_persistence"]["burst"], 1)
+        self.assertEqual(payload["upstream_health"]["probe_method"], "HEAD")
 
 
 if __name__ == "__main__":
