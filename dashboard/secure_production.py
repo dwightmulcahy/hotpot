@@ -234,6 +234,13 @@ class SecureProductionDashboard(ProductionDashboard):
             },
             separators=(",", ":"),
         )
+        # JSON is embedded directly inside an inline script. Escape characters that
+        # could terminate a script element when supplied through the Basic username.
+        config = (
+            config.replace("&", "\\u0026")
+            .replace("<", "\\u003c")
+            .replace(">", "\\u003e")
+        )
         return f"""<script>
 window.HOTPOT_SECURITY={config};
 (()=>{{
@@ -264,7 +271,9 @@ window.HOTPOT_SECURITY={config};
         bootstrap = self._bootstrap_script(
             csrf, fresh.username, public.get("expires_at")
         )
-        html = PRODUCTION_HTML.replace("<script>\nconst esc", bootstrap + "<script>\nconst esc", 1)
+        html = PRODUCTION_HTML.replace(
+            "<script>\nconst esc", bootstrap + "<script>\nconst esc", 1
+        )
         response = web.Response(
             text=html,
             content_type="text/html",
