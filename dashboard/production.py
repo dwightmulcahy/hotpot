@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +38,10 @@ class ProductionDashboard(core.Dashboard):
             900.0,
             float(os.getenv("HOTPOT_DASHBOARD_HOUSEKEEPING_INTERVAL_HOURS", "6"))
             * 3600.0,
+        )
+        self.cloudflare_reconcile_seconds = max(
+            60.0,
+            float(os.getenv("HOTPOT_CLOUDFLARE_RECONCILE_SECONDS", "300")),
         )
         self.geoip_enrich_batch = max(
             1,
@@ -73,6 +78,7 @@ class ProductionDashboard(core.Dashboard):
             or CLOUDFLARE_API_BASE,
         )
         self._last_housekeeping = 0.0
+        self._last_cloudflare_reconcile = 0.0
         self.maintenance_errors = 0
         self.store = EnforcementStore(
             Path(os.getenv("HOTPOT_DASHBOARD_DATA_DIR", "/data")),
@@ -280,6 +286,55 @@ class ProductionDashboard(core.Dashboard):
         applied = await self.store.mark_applied(recommendation_id, rules)
         return applied or recommendation
 
+    async def _maybe_reconcile_cloudflare(
+        self, *, force: bool = False
+    ) -> dict[str, Any]:
+        latest = await self.store.latest_reconciliation()
+        if not self.cloudflare.can_remove:
+            return {
+                **latest,
+                "available": False,
+                "status": latest.get("status", "unavailable"),
+                "reason": "Cloudflare API token is not configured",
+            }
+        now = time.monotonic()
+        if (
+            not force
+            and self._last_cloudflare_reconcile
+            and now - self._last_cloudflare_reconcile
+            < self.cloudflare_reconcile_seconds
+        ):
+            return {**latest, "available": True}
+
+        self._last_cloudflare_reconcile = now
+        applied = await self.store.recommendations(
+            self.response_policy, status="applied", limit=500
+        )
+        try:
+            report = await self._cloudflare_enforcer().reconcile(
+                list(applied.get("recommendations") or [])
+            )
+        except Exception as exc:
+            report = {
+                "checked_at": datetime.now(timezone.utc).isoformat(),
+                "status": "error",
+                "recommendations": [],
+                "counts": {
+                    "healthy": 0,
+                    "drifted": 0,
+                    "missing": 0,
+                    "error": 0,
+                },
+                "orphans": [],
+                "orphaned": 0,
+                "zone_errors": [
+                    {"zone_id": None, "error": f"{type(exc).__name__}: {exc}"}
+                ],
+                "zones_checked": 0,
+            }
+        await self.store.record_reconciliation(report)
+        return {**report, "available": True}
+
     async def _reconcile_enforcement(self) -> dict[str, Any]:
         if self.cloudflare.configured:
             for recommendation in await self.store.approved_recommendations(20):
@@ -291,11 +346,19 @@ class ProductionDashboard(core.Dashboard):
                     list(recommendation.get("enforcement_rules") or [])
                 )
                 await self.store.mark_removal_result(
-                    str(recommendation.get("recommendation_id") or ""), errors
+                    str(recommendation.get("recommendation_id") or ""),
+                    errors,
+                    reason="automatic_expiry",
                 )
 
+        reconciliation = await self._maybe_reconcile_cloudflare()
         state = await self.store.enforcement_summary()
-        return {**self.cloudflare.public_status(), **state}
+        return {
+            **self.cloudflare.public_status(),
+            **state,
+            "reconciliation": reconciliation,
+            "reconcile_interval_seconds": self.cloudflare_reconcile_seconds,
+        }
 
     async def _response_payload(
         self, apps: list[dict[str, Any]], *, sync: bool = True
@@ -468,6 +531,21 @@ class ProductionDashboard(core.Dashboard):
             raise web.HTTPNotFound(text="recommendation not found")
         return web.json_response(result, headers={"Cache-Control": "no-store"})
 
+    async def api_audit(self, request: web.Request) -> web.Response:
+        self.require_auth(request)
+        recommendation_id = request.query.get("recommendation_id", "").strip() or None
+        try:
+            limit = max(1, min(500, int(request.query.get("limit", "100"))))
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text="limit must be an integer") from exc
+        rows = await self.store.audit_log(
+            limit=limit, recommendation_id=recommendation_id
+        )
+        return web.json_response(
+            {"count": len(rows), "events": rows},
+            headers={"Cache-Control": "no-store"},
+        )
+
     async def api_dismiss_recommendation(self, request: web.Request) -> web.Response:
         self.require_auth(request)
         if request.headers.get("X-Hotpot-Action", "") != "dismiss":
@@ -514,6 +592,10 @@ class ProductionDashboard(core.Dashboard):
             raise web.HTTPNotFound(text="recommendation not found")
 
         result = await self._apply_one(approved)
+        # Force a fresh read after successful apply so the UI immediately confirms
+        # the Cloudflare rule exists rather than waiting for the periodic interval.
+        if result.get("status") == "applied":
+            await self._maybe_reconcile_cloudflare(force=True)
         await self._refresh_response_cache()
         status = 200 if result.get("status") == "applied" else 502
         return web.json_response(
@@ -541,7 +623,11 @@ class ProductionDashboard(core.Dashboard):
         errors = await self._cloudflare_enforcer().remove(
             list(result.get("enforcement_rules") or [])
         )
-        result = await self.store.mark_removal_result(recommendation_id, errors)
+        result = await self.store.mark_removal_result(
+            recommendation_id, errors, reason="manual_remove"
+        )
+        if not errors:
+            await self._maybe_reconcile_cloudflare(force=True)
         await self._refresh_response_cache()
         if result is None:
             raise web.HTTPNotFound(text="recommendation not found")
@@ -549,6 +635,234 @@ class ProductionDashboard(core.Dashboard):
         return web.json_response(
             result, status=status, headers={"Cache-Control": "no-store"}
         )
+
+    async def api_reconcile_enforcement(self, request: web.Request) -> web.Response:
+        self.require_auth(request)
+        if request.headers.get("X-Hotpot-Action", "") != "reconcile":
+            raise web.HTTPBadRequest(
+                text="X-Hotpot-Action: reconcile header is required"
+            )
+        if not self.cloudflare.can_remove:
+            raise web.HTTPServiceUnavailable(
+                text="Cloudflare API token is required for reconciliation"
+            )
+        report = await self._maybe_reconcile_cloudflare(force=True)
+        await self._refresh_response_cache()
+        return web.json_response(report, headers={"Cache-Control": "no-store"})
+
+    async def _run_system_check(self) -> dict[str, Any]:
+        started_at = datetime.now(timezone.utc)
+        checks: list[dict[str, Any]] = []
+
+        def add_check(
+            check_id: str,
+            name: str,
+            status: str,
+            detail: str,
+            *,
+            duration_ms: int | None = None,
+        ) -> None:
+            item: dict[str, Any] = {
+                "id": check_id,
+                "name": name,
+                "status": status,
+                "detail": detail,
+            }
+            if duration_ms is not None:
+                item["duration_ms"] = duration_ms
+            checks.append(item)
+
+        for instance in self.instances:
+            tick = time.monotonic()
+            try:
+                status = await self.fetch_json(f"{instance.url}/_hotpot/status")
+                healthy = bool(status.get("healthy", False))
+                add_check(
+                    f"instance:{instance.instance_id}",
+                    f"{instance.name} status API",
+                    "pass" if healthy else "fail",
+                    "Authenticated and healthy" if healthy else "API responded but instance is not healthy",
+                    duration_ms=int((time.monotonic() - tick) * 1000),
+                )
+            except Exception as exc:
+                add_check(
+                    f"instance:{instance.instance_id}",
+                    f"{instance.name} status API",
+                    "fail",
+                    f"{type(exc).__name__}: {exc}",
+                    duration_ms=int((time.monotonic() - tick) * 1000),
+                )
+
+            tick = time.monotonic()
+            try:
+                payload = await self.fetch_json(
+                    f"{instance.url}/_hotpot/api/events?cursor=0&limit=1"
+                )
+                valid = isinstance(payload.get("events", []), list)
+                add_check(
+                    f"events:{instance.instance_id}",
+                    f"{instance.name} event API",
+                    "pass" if valid else "fail",
+                    "Authenticated and readable" if valid else "Event API response was malformed",
+                    duration_ms=int((time.monotonic() - tick) * 1000),
+                )
+            except Exception as exc:
+                add_check(
+                    f"events:{instance.instance_id}",
+                    f"{instance.name} event API",
+                    "fail",
+                    f"{type(exc).__name__}: {exc}",
+                    duration_ms=int((time.monotonic() - tick) * 1000),
+                )
+
+        tick = time.monotonic()
+        try:
+            storage = await self.store.storage_self_check()
+            quick = str(storage.get("quick_check") or "")
+            ok = bool(storage.get("writable")) and quick.lower() == "ok"
+            add_check(
+                "sqlite",
+                "SQLite durability",
+                "pass" if ok else "fail",
+                f"Writable; quick_check={quick}" if ok else f"Storage check failed: quick_check={quick}",
+                duration_ms=int((time.monotonic() - tick) * 1000),
+            )
+        except Exception as exc:
+            add_check(
+                "sqlite",
+                "SQLite durability",
+                "fail",
+                f"{type(exc).__name__}: {exc}",
+                duration_ms=int((time.monotonic() - tick) * 1000),
+            )
+
+        self.geoip.reload_if_changed()
+        geo = self.geoip.status()
+        if geo.get("enabled"):
+            errors = list(geo.get("errors") or [])
+            add_check(
+                "geoip",
+                "GeoIP databases",
+                "fail" if errors else "pass",
+                "; ".join(str(value) for value in errors)
+                if errors
+                else "Configured databases are loaded and readable",
+            )
+        else:
+            add_check(
+                "geoip",
+                "GeoIP databases",
+                "warning",
+                "GeoIP enrichment is disabled",
+            )
+
+        configured_instance_ids = set(self.cloudflare.targets)
+        missing_mappings = sorted(
+            instance.instance_id
+            for instance in self.instances
+            if instance.instance_id not in configured_instance_ids
+        )
+        if self.cloudflare.configured and not missing_mappings:
+            add_check(
+                "cloudflare-config",
+                "Cloudflare target mappings",
+                "pass",
+                f"{len(self.cloudflare.targets)} instances across {len({target.zone_id for target in self.cloudflare.targets.values()})} zone(s)",
+            )
+        elif self.cloudflare.api_token:
+            add_check(
+                "cloudflare-config",
+                "Cloudflare target mappings",
+                "warning" if missing_mappings else "pass",
+                "Missing mappings: " + ", ".join(missing_mappings)
+                if missing_mappings
+                else "Cloudflare enforcement is disabled by configuration",
+            )
+        else:
+            add_check(
+                "cloudflare-config",
+                "Cloudflare configuration",
+                "warning",
+                "Cloudflare API token is not configured",
+            )
+
+        if self.cloudflare.api_token:
+            zones = sorted(
+                {target.zone_id for target in self.cloudflare.targets.values()}
+            )
+            for zone_id in zones:
+                tick = time.monotonic()
+                try:
+                    inspected = await self._cloudflare_enforcer().inspect_zone(zone_id)
+                    detail = (
+                        f"Accessible; ruleset {inspected.get('ruleset_id')}"
+                        if inspected.get("entrypoint_exists")
+                        else "Accessible; no custom-WAF entrypoint exists yet"
+                    )
+                    add_check(
+                        f"cloudflare-zone:{zone_id}",
+                        f"Cloudflare zone {zone_id[:8]}…",
+                        "pass",
+                        detail,
+                        duration_ms=int((time.monotonic() - tick) * 1000),
+                    )
+                except Exception as exc:
+                    add_check(
+                        f"cloudflare-zone:{zone_id}",
+                        f"Cloudflare zone {zone_id[:8]}…",
+                        "fail",
+                        f"{type(exc).__name__}: {exc}",
+                        duration_ms=int((time.monotonic() - tick) * 1000),
+                    )
+
+        async with self.cache_lock:
+            database = dict(self.cache.get("database") or {})
+        housekeeping = database.get("last_housekeeping") or {}
+        if self.maintenance_errors:
+            add_check(
+                "housekeeping",
+                "Housekeeping",
+                "fail",
+                f"{self.maintenance_errors} maintenance error(s) recorded",
+            )
+        elif housekeeping.get("at"):
+            add_check(
+                "housekeeping",
+                "Housekeeping",
+                "pass",
+                f"Last successful run {housekeeping.get('at')}",
+            )
+        else:
+            add_check(
+                "housekeeping",
+                "Housekeeping",
+                "warning",
+                "No completed housekeeping run is recorded yet",
+            )
+
+        failed = sum(1 for item in checks if item["status"] == "fail")
+        warnings = sum(1 for item in checks if item["status"] == "warning")
+        passed = sum(1 for item in checks if item["status"] == "pass")
+        overall = "fail" if failed else "warning" if warnings else "pass"
+        return {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "duration_ms": int(
+                (datetime.now(timezone.utc) - started_at).total_seconds() * 1000
+            ),
+            "status": overall,
+            "summary": {"passed": passed, "warnings": warnings, "failed": failed},
+            "checks": checks,
+            "destructive": False,
+        }
+
+    async def api_system_check(self, request: web.Request) -> web.Response:
+        self.require_auth(request)
+        if request.headers.get("X-Hotpot-Action", "") != "system-check":
+            raise web.HTTPBadRequest(
+                text="X-Hotpot-Action: system-check header is required"
+            )
+        result = await self._run_system_check()
+        return web.json_response(result, headers={"Cache-Control": "no-store"})
 
     async def index(self, request: web.Request) -> web.Response:
         self.require_auth(request)
@@ -580,6 +894,7 @@ def build_app() -> web.Application:
     app.router.add_get("/api/network", dashboard.api_network)
     app.router.add_get("/api/recommendations", dashboard.api_recommendations)
     app.router.add_get("/api/recommendation", dashboard.api_recommendation)
+    app.router.add_get("/api/audit", dashboard.api_audit)
     app.router.add_post(
         "/api/recommendation/{recommendation_id}/dismiss",
         dashboard.api_dismiss_recommendation,
@@ -592,6 +907,11 @@ def build_app() -> web.Application:
         "/api/recommendation/{recommendation_id}/remove",
         dashboard.api_remove_enforcement,
     )
+    app.router.add_post(
+        "/api/enforcement/reconcile",
+        dashboard.api_reconcile_enforcement,
+    )
+    app.router.add_post("/api/system-check", dashboard.api_system_check)
     return app
 
 
