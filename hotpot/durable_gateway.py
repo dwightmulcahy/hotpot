@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import time
 
@@ -12,6 +13,7 @@ from .config import Settings
 from .durable_store import SourceIdentityStore
 from .intelligence import classify, escalation_for
 from .store import AttackerState
+from .telemetry import BoundedTelemetryQueue, TelemetryWork
 
 # ResilientStore resolves this runtime module global when each Hotpot instance is
 # constructed, so production keeps telemetry fail-safety while gaining a stable
@@ -22,6 +24,59 @@ from .gateway import GatewayHotpot  # noqa: E402  (must follow runtime store ove
 
 
 class DurableGatewayHotpot(GatewayHotpot):
+    def __init__(self, settings: Settings):
+        super().__init__(settings)
+        self.telemetry_queue = BoundedTelemetryQueue(
+            capacity=max(32, int(os.getenv("HOTPOT_TELEMETRY_QUEUE_MAX", "2048"))),
+            drain_timeout=max(
+                0.1,
+                float(os.getenv("HOTPOT_TELEMETRY_DRAIN_TIMEOUT_SECONDS", "5")),
+            ),
+        )
+        self.stats["telemetry_queue_dropped"] = 0
+        self.stats["telemetry_queue_dropped_jsonl"] = 0
+        self.stats["telemetry_queue_dropped_notify"] = 0
+
+    async def startup(self, app: web.Application) -> None:
+        await super().startup(app)
+        await self.telemetry_queue.start(self._process_telemetry_work)
+
+    async def shutdown(self, app: web.Application) -> None:
+        # Drain auxiliary telemetry while the shared HTTP client is still available
+        # to notification delivery, then let the inherited shutdown close clients.
+        await self.telemetry_queue.stop()
+        await super().shutdown(app)
+
+    async def _process_telemetry_work(self, work: TelemetryWork) -> None:
+        if work.kind == "jsonl":
+            # Bypass this class's queueing override and use HardenedHotpot's
+            # resilient direct JSONL writer from the background worker.
+            await super()._safe_event_write(work.event)
+            return
+        if work.kind == "notify":
+            try:
+                await self._notify_direct(work.event)
+            except Exception:
+                self.stats["telemetry_errors"] += 1
+                self.stats["notification_state_errors"] += 1
+                raise
+            return
+        self.stats["telemetry_errors"] += 1
+        raise RuntimeError(f"unknown telemetry work kind: {work.kind}")
+
+    def _submit_telemetry(self, kind: str, event: dict) -> bool:
+        accepted = self.telemetry_queue.submit(kind, event)
+        if not accepted:
+            self.stats["telemetry_queue_dropped"] += 1
+            self.stats[f"telemetry_queue_dropped_{kind}"] += 1
+        return accepted
+
+    async def _safe_event_write(self, event: dict) -> None:
+        if self.telemetry_queue.running:
+            self._submit_telemetry("jsonl", event)
+            return
+        await super()._safe_event_write(event)
+
     @property
     def source_id(self) -> str | None:
         inner = getattr(self.store, "inner", None)
@@ -64,9 +119,21 @@ class DurableGatewayHotpot(GatewayHotpot):
         payload["event_cursor_max"] = await runtime_layer.asyncio.to_thread(
             self._max_event_id_sync
         )
+        payload["telemetry_queue"] = self.telemetry_queue.snapshot()
         return web.json_response(payload, headers={"Cache-Control": "no-store"})
 
     async def maybe_notify(self, event: dict) -> None:
+        if not self.notifier.enabled:
+            return
+        level = int(event.get("escalation_level", 1))
+        if level < self.settings.notify_min_level:
+            return
+        if self.telemetry_queue.running:
+            self._submit_telemetry("notify", event)
+            return
+        await self._notify_direct(event)
+
+    async def _notify_direct(self, event: dict) -> None:
         if not self.notifier.enabled:
             return
         level = int(event.get("escalation_level", 1))
