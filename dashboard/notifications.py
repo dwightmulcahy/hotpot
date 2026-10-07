@@ -43,7 +43,9 @@ class NotificationConfig:
     def from_env(cls) -> "NotificationConfig":
         recipients = tuple(
             value.strip()
-            for value in os.getenv("HOTPOT_DASHBOARD_SMTP_TO", "").replace(";", ",").split(",")
+            for value in os.getenv("HOTPOT_DASHBOARD_SMTP_TO", "")
+            .replace(";", ",")
+            .split(",")
             if value.strip()
         )
         return cls(
@@ -94,7 +96,7 @@ class NotificationConfig:
 
 
 class NotificationCenter:
-    """Turn high-value dashboard events into durable webhook/email notifications."""
+    """Turn only high-value dashboard events into durable notifications."""
 
     AUDIT_CURSOR_KEY = "notification_audit_cursor_v1"
     HEALTH_STATE_KEY = "notification_instance_health_v1"
@@ -103,104 +105,101 @@ class NotificationCenter:
         self.config = config
         self.store = store
 
-    async def _recommendation_candidate(
-        self, audit: dict[str, Any]
-    ) -> dict[str, Any] | None:
-        recommendation_id = str(audit.get("recommendation_id") or "")
-        if not recommendation_id:
-            return None
-        recommendation = await self.store.recommendation(recommendation_id)
-        if recommendation is None:
-            return None
-        action = str(recommendation.get("action") or "")
-        confidence = str(recommendation.get("confidence") or "")
-        evidence = recommendation.get("evidence") or {}
-        actor = str(recommendation.get("actor_key") or audit.get("actor_key") or "unknown")
-        level = int(evidence.get("global_level", 1) or 1)
-        score = int(evidence.get("global_score", 0) or 0)
-        hits = int(evidence.get("observed_hits", 0) or 0)
-        apps = int(evidence.get("app_count", 0) or 0)
-        if action in {"recommend_block", "recommend_long_block"}:
-            return {
-                "severity": "critical",
-                "subject": f"L4 response recommendation for {actor}",
-                "message": (
-                    f"Hotpot recommends {action.replace('recommend_', '').replace('_', ' ')} "
-                    f"for {actor}: score {score}, {hits} hits across {apps} app(s)."
-                ),
-                "payload": {
-                    "global_level": level,
-                    "global_score": score,
-                    "observed_hits": hits,
-                    "app_count": apps,
-                    "action": action,
-                    "confidence": confidence,
-                },
-            }
-        if action == "recommend_challenge" and confidence == "high":
-            return {
-                "severity": "warning",
-                "subject": f"High-confidence L3 challenge recommendation for {actor}",
-                "message": (
-                    f"Hotpot recommends a managed challenge for {actor}: score {score}, "
-                    f"{hits} hits across {apps} app(s)."
-                ),
-                "payload": {
-                    "global_level": level,
-                    "global_score": score,
-                    "observed_hits": hits,
-                    "app_count": apps,
-                    "action": action,
-                    "confidence": confidence,
-                },
-            }
-        return None
-
     async def _candidate_from_audit(
         self, audit: dict[str, Any]
     ) -> dict[str, Any] | None:
         event_type = str(audit.get("event_type") or "")
         actor = str(audit.get("actor_key") or "unknown")
-        recommendation_id = str(audit.get("recommendation_id") or "") or None
         details = audit.get("details") if isinstance(audit.get("details"), dict) else {}
+
         if event_type == "recommendation_created":
-            return await self._recommendation_candidate(audit)
-        if event_type == "applied":
+            recommendation_id = str(audit.get("recommendation_id") or "")
+            recommendation = (
+                await self.store.recommendation(recommendation_id)
+                if recommendation_id
+                else None
+            )
+            if recommendation is None:
+                return None
+            action = str(recommendation.get("action") or "")
+            confidence = str(recommendation.get("confidence") or "")
+            evidence = recommendation.get("evidence") or {}
+            score = int(evidence.get("global_score", 0) or 0)
+            hits = int(evidence.get("observed_hits", 0) or 0)
+            apps = int(evidence.get("app_count", 0) or 0)
+            if action in {"recommend_block", "recommend_long_block"}:
+                return {
+                    "severity": "critical",
+                    "subject": f"L4 response recommendation for {actor}",
+                    "message": (
+                        f"Hotpot recommends {action.replace('recommend_', '').replace('_', ' ')} "
+                        f"for {actor}: score {score}, {hits} hits across {apps} app(s)."
+                    ),
+                    "payload": {
+                        "action": action,
+                        "confidence": confidence,
+                        "global_score": score,
+                        "observed_hits": hits,
+                        "app_count": apps,
+                    },
+                }
+            if action == "recommend_challenge" and confidence == "high":
+                return {
+                    "severity": "warning",
+                    "subject": f"High-confidence L3 challenge recommendation for {actor}",
+                    "message": (
+                        f"Hotpot recommends a managed challenge for {actor}: score {score}, "
+                        f"{hits} hits across {apps} app(s)."
+                    ),
+                    "payload": {
+                        "action": action,
+                        "confidence": confidence,
+                        "global_score": score,
+                        "observed_hits": hits,
+                        "app_count": apps,
+                    },
+                }
+            return None
+
+        mapping: dict[str, tuple[str, str, str]] = {
+            "applied": (
+                "info",
+                f"Cloudflare enforcement applied for {actor}",
+                "Cloudflare enforcement applied",
+            ),
+            "apply_failed": (
+                "critical",
+                f"Cloudflare enforcement failed for {actor}",
+                "Cloudflare enforcement apply failed",
+            ),
+            "removal_failed": (
+                "critical",
+                f"Cloudflare rule removal failed for {actor}",
+                "Cloudflare rule removal failed",
+            ),
+            "orphan_detected": (
+                "warning",
+                "Orphaned Hotpot Cloudflare rule detected",
+                "Orphaned Hotpot Cloudflare rule detected",
+            ),
+        }
+        if event_type in mapping:
+            severity, subject, fallback = mapping[event_type]
             return {
-                "severity": "info",
-                "subject": f"Cloudflare enforcement applied for {actor}",
-                "message": str(audit.get("message") or "Cloudflare enforcement applied"),
-                "payload": details,
-            }
-        if event_type == "apply_failed":
-            return {
-                "severity": "critical",
-                "subject": f"Cloudflare enforcement failed for {actor}",
-                "message": str(audit.get("message") or "Cloudflare enforcement apply failed"),
-                "payload": details,
-            }
-        if event_type == "removal_failed":
-            return {
-                "severity": "critical",
-                "subject": f"Cloudflare rule removal failed for {actor}",
-                "message": str(audit.get("message") or "Cloudflare rule removal failed"),
+                "severity": severity,
+                "subject": subject,
+                "message": str(audit.get("message") or fallback),
                 "payload": details,
             }
         if event_type == "reconciliation_issue":
             reconciliation = details.get("reconciliation") if isinstance(details, dict) else {}
             status = str((reconciliation or {}).get("status") or "drifted")
-            severity = "critical" if status in {"missing", "error"} else "warning"
             return {
-                "severity": severity,
+                "severity": "critical" if status in {"missing", "error"} else "warning",
                 "subject": f"Cloudflare reconciliation {status} for {actor}",
-                "message": str(audit.get("message") or f"Cloudflare reconciliation detected {status}"),
-                "payload": details,
-            }
-        if event_type == "orphan_detected":
-            return {
-                "severity": "warning",
-                "subject": "Orphaned Hotpot Cloudflare rule detected",
-                "message": str(audit.get("message") or "Orphaned Hotpot rule detected"),
+                "message": str(
+                    audit.get("message") or f"Cloudflare reconciliation detected {status}"
+                ),
                 "payload": details,
             }
         return None
@@ -208,8 +207,8 @@ class NotificationCenter:
     async def sync_audit_events(self, client: ClientSession) -> dict[str, int]:
         state = await self.store.observability_state(self.AUDIT_CURSOR_KEY)
         if state is None:
-            # Do not blast historical enforcement events when notifications are first
-            # deployed. Start from the current high-water mark and notify only new work.
+            # Seed at the current high-water mark so enabling notifications does not
+            # send a backlog of historical enforcement messages.
             current = await self.store.latest_audit_id()
             await self.store.set_observability_state(
                 self.AUDIT_CURSOR_KEY, {"audit_id": current}
@@ -271,47 +270,48 @@ class NotificationCenter:
             prior = previous.get(instance_id)
             prior_healthy = prior.get("healthy") if isinstance(prior, dict) else None
             name = str(app.get("name") or instance_id)
-            if prior_healthy is None:
-                if not healthy:
-                    _, created = await self.store.queue_notification(
-                        event_key=f"instance-unhealthy:{instance_id}:{now}",
-                        event_type="instance_unhealthy",
-                        severity="critical",
-                        subject=f"Hotpot instance unhealthy: {name}",
-                        message=(
-                            f"{name} is unhealthy: "
-                            f"{app.get('error') or (app.get('upstream_health') or {}).get('error') or 'health check failed'}"
-                        ),
-                        channels=self.config.channels,
-                        payload={"instance_id": instance_id, "app": app},
+            error = str(
+                app.get("error")
+                or (app.get("upstream_health") or {}).get("error")
+                or "health check failed"
+            )
+            if prior_healthy is None and not healthy:
+                queued += int(
+                    await self._queue_health(
+                        f"instance-unhealthy:{instance_id}:{now}",
+                        "instance_unhealthy",
+                        "critical",
+                        f"Hotpot instance unhealthy: {name}",
+                        f"{name} is unhealthy: {error}",
+                        instance_id,
+                        app,
                     )
-                    queued += int(created)
-            elif bool(prior_healthy) and not healthy:
-                _, created = await self.store.queue_notification(
-                    event_key=f"instance-unhealthy:{instance_id}:{now}",
-                    event_type="instance_unhealthy",
-                    severity="critical",
-                    subject=f"Hotpot instance unhealthy: {name}",
-                    message=(
-                        f"{name} changed from healthy to unhealthy: "
-                        f"{app.get('error') or (app.get('upstream_health') or {}).get('error') or 'health check failed'}"
-                    ),
-                    channels=self.config.channels,
-                    payload={"instance_id": instance_id, "app": app},
                 )
-                queued += int(created)
+            elif prior_healthy is True and not healthy:
+                queued += int(
+                    await self._queue_health(
+                        f"instance-unhealthy:{instance_id}:{now}",
+                        "instance_unhealthy",
+                        "critical",
+                        f"Hotpot instance unhealthy: {name}",
+                        f"{name} changed from healthy to unhealthy: {error}",
+                        instance_id,
+                        app,
+                    )
+                )
             elif prior_healthy is False and healthy:
-                incident_started = str(prior.get("changed_at") or now) if isinstance(prior, dict) else now
-                _, created = await self.store.queue_notification(
-                    event_key=f"instance-recovered:{instance_id}:{incident_started}",
-                    event_type="instance_recovered",
-                    severity="info",
-                    subject=f"Hotpot instance recovered: {name}",
-                    message=f"{name} is healthy again.",
-                    channels=self.config.channels,
-                    payload={"instance_id": instance_id},
+                incident = str((prior or {}).get("changed_at") or now)
+                queued += int(
+                    await self._queue_health(
+                        f"instance-recovered:{instance_id}:{incident}",
+                        "instance_recovered",
+                        "info",
+                        f"Hotpot instance recovered: {name}",
+                        f"{name} is healthy again.",
+                        instance_id,
+                        {"id": instance_id, "name": name, "healthy": True},
+                    )
                 )
-                queued += int(created)
             changed = prior_healthy is None or bool(prior_healthy) != healthy
             updated[instance_id] = {
                 "healthy": healthy,
@@ -321,6 +321,27 @@ class NotificationCenter:
         await self.store.set_observability_state(self.HEALTH_STATE_KEY, updated)
         await self.deliver_due(client)
         return queued
+
+    async def _queue_health(
+        self,
+        event_key: str,
+        event_type: str,
+        severity: str,
+        subject: str,
+        message: str,
+        instance_id: str,
+        app: dict[str, Any],
+    ) -> bool:
+        _, created = await self.store.queue_notification(
+            event_key=event_key,
+            event_type=event_type,
+            severity=severity,
+            subject=subject,
+            message=message,
+            channels=self.config.channels,
+            payload={"instance_id": instance_id, "app": app},
+        )
+        return created
 
     async def record_system_check_failure(
         self, result: dict[str, Any], client: ClientSession
@@ -332,7 +353,9 @@ class NotificationCenter:
             for item in result.get("checks") or []
             if isinstance(item, dict) and item.get("status") == "fail"
         ]
-        fingerprint = hashlib.sha256("|".join(sorted(failed)).encode("utf-8")).hexdigest()[:16]
+        fingerprint = hashlib.sha256(
+            "|".join(sorted(failed)).encode("utf-8")
+        ).hexdigest()[:16]
         bucket = datetime.now(timezone.utc).strftime("%Y%m%d%H")
         summary = result.get("summary") or {}
         _, created = await self.store.queue_notification(
@@ -365,7 +388,11 @@ class NotificationCenter:
     ) -> bool:
         event_key = str(notification.get("event_key") or "")
         channels = [str(value) for value in notification.get("channels") or []]
-        delivery = notification.get("delivery") if isinstance(notification.get("delivery"), dict) else {}
+        delivery = (
+            notification.get("delivery")
+            if isinstance(notification.get("delivery"), dict)
+            else {}
+        )
         outcomes: dict[str, dict[str, Any]] = {}
         for channel in channels:
             current = delivery.get(channel)
@@ -452,17 +479,25 @@ class NotificationCenter:
             )
         )
         context = ssl.create_default_context()
-        smtp_class = smtplib.SMTP_SSL if self.config.smtp_ssl else smtplib.SMTP
-        with smtp_class(
-            self.config.smtp_host,
-            self.config.smtp_port,
-            timeout=10,
-            context=context if self.config.smtp_ssl else None,
-        ) if self.config.smtp_ssl else smtp_class(
-            self.config.smtp_host, self.config.smtp_port, timeout=10
-        ) as server:
+        if self.config.smtp_ssl:
+            server: smtplib.SMTP = smtplib.SMTP_SSL(
+                self.config.smtp_host,
+                self.config.smtp_port,
+                timeout=10,
+                context=context,
+            )
+        else:
+            server = smtplib.SMTP(
+                self.config.smtp_host, self.config.smtp_port, timeout=10
+            )
+        try:
             if not self.config.smtp_ssl and self.config.smtp_starttls:
                 server.starttls(context=context)
             if self.config.smtp_username:
                 server.login(self.config.smtp_username, self.config.smtp_password)
             server.send_message(message)
+        finally:
+            try:
+                server.quit()
+            except Exception:
+                server.close()
