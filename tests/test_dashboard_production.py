@@ -15,7 +15,9 @@ class DashboardProductionTests(unittest.IsolatedAsyncioTestCase):
     def make_dashboard(self) -> ProductionDashboard:
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        instances = [{"id": "one", "name": "One", "url": "http://127.0.0.1:18001"}]
+        instances = [
+            {"id": "one", "name": "One", "url": "http://127.0.0.1:18001"}
+        ]
         with patch.dict(
             os.environ,
             {
@@ -28,18 +30,22 @@ class DashboardProductionTests(unittest.IsolatedAsyncioTestCase):
         ):
             return ProductionDashboard()
 
-    async def test_collect_status_exposes_build_and_suppression(self) -> None:
+    async def test_collect_status_exposes_build_and_suppression_with_one_fetch(self) -> None:
         dashboard = self.make_dashboard()
+        calls = []
 
         async def fetch_json(url: str):
+            calls.append(url)
             return {
                 "healthy": True,
                 "uptime_seconds": 10,
                 "upstream": "http://example",
-                "upstream_health": {"healthy": True},
+                "upstream_health": {"healthy": True, "probe_method": "HEAD"},
                 "version": "v1.2.3",
                 "git_sha": "abcdef0123456789",
                 "build_date": "2026-10-06T16:00:00Z",
+                "source_id": "source-one",
+                "event_cursor_max": 44,
                 "stats": {
                     "tarpits_active": 1,
                     "tarpits_total": 4,
@@ -51,22 +57,50 @@ class DashboardProductionTests(unittest.IsolatedAsyncioTestCase):
             }
 
         dashboard.fetch_json = fetch_json
-        row = await dashboard.collect_status(Instance("one", "One", "http://127.0.0.1:18001"))
+        row = await dashboard.collect_status(
+            Instance("one", "One", "http://127.0.0.1:18001")
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0].endswith("/_hotpot/status"))
         self.assertEqual(row["version"], "v1.2.3")
         self.assertEqual(row["git_sha"], "abcdef0123456789")
         self.assertEqual(row["events_suppressed"], 7)
         self.assertEqual(row["events_persisted"], 11)
+        self.assertEqual(row["source_id"], "source-one")
+        self.assertEqual(row["event_cursor_max"], 44)
+        self.assertEqual(row["upstream_health"]["probe_method"], "HEAD")
 
-    def test_dashboard_html_surfaces_suppression_and_version(self) -> None:
+    def test_dashboard_html_surfaces_operations_without_string_rewrite(self) -> None:
         self.assertIn("Suppressed", PRODUCTION_HTML)
-        self.assertIn("events_suppressed", PRODUCTION_HTML)
-        self.assertIn("a.version", PRODUCTION_HTML)
+        self.assertIn("Top networks / ASNs", PRODUCTION_HTML)
+        self.assertIn("Operational health", PRODUCTION_HTML)
+        self.assertIn("GeoIP / attribution", PRODUCTION_HTML)
+        self.assertIn("Backlog", PRODUCTION_HTML)
+        root = Path(__file__).resolve().parents[1]
+        production = (root / "dashboard" / "production.py").read_text(encoding="utf-8")
+        self.assertNotIn("PRODUCTION_HTML.replace", production)
+        self.assertIn("from .template import PRODUCTION_HTML", production)
 
     def test_dashboard_image_copies_server_header_hardening(self) -> None:
         root = Path(__file__).resolve().parents[1]
         dockerfile = (root / "Dockerfile.dashboard").read_text(encoding="utf-8")
         self.assertIn("COPY sitecustomize.py ./sitecustomize.py", dockerfile)
         self.assertIn('CMD ["python", "-m", "dashboard.production"]', dockerfile)
+
+    def test_core_and_dashboard_dependency_sets_are_split(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        core = (root / "requirements-core.txt").read_text(encoding="utf-8")
+        dashboard = (root / "requirements-dashboard.txt").read_text(encoding="utf-8")
+        core_dockerfile = (root / "Dockerfile").read_text(encoding="utf-8")
+        dashboard_dockerfile = (root / "Dockerfile.dashboard").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("aiohttp", core)
+        self.assertNotIn("geoip2", core)
+        self.assertIn("geoip2", dashboard)
+        self.assertIn("requirements-core.txt", core_dockerfile)
+        self.assertNotIn("requirements-dashboard.txt", core_dockerfile)
+        self.assertIn("requirements-dashboard.txt", dashboard_dockerfile)
 
 
 if __name__ == "__main__":

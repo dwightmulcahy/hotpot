@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import os
 import time
+from datetime import datetime, timezone
 from typing import AsyncIterator
 
-from aiohttp import web
+from aiohttp import ClientTimeout, web
 from multidict import CIMultiDict
 
 from . import app as core_app
@@ -27,6 +29,9 @@ def _env_bool(name: str, default: bool) -> bool:
 
 class ProductionHotpot(HardenedHotpot):
     """Final production policy layer for proxy and telemetry hardening."""
+
+    HEALTHCHECK_FALLBACK_STATUSES = {405, 501}
+    HEALTHCHECK_GET_BYTES = 1024
 
     def __init__(self, settings: Settings):
         super().__init__(settings)
@@ -51,6 +56,76 @@ class ProductionHotpot(HardenedHotpot):
         self.stats["events_suppressed_total"] = 0
         self.stats["events_persisted_total"] = 0
         self.stats["request_body_rejected"] = 0
+
+    def authorized(self, request: web.Request) -> bool:
+        """Authenticate admin endpoints without ordinary string equality."""
+
+        token = self.settings.admin_token
+        if not token:
+            return False
+        presented = request.headers.get("Authorization", "")
+        expected = f"Bearer {token}"
+        return hmac.compare_digest(presented, expected)
+
+    async def _probe_upstream(self, method: str) -> int:
+        assert self.client is not None
+        timeout = ClientTimeout(total=self.health_timeout)
+        headers = None
+        if method == "GET":
+            # Ask cooperative origins for only a byte range and, regardless of whether
+            # they honor it, read only a tiny prefix before releasing the response.
+            headers = {"Range": f"bytes=0-{self.HEALTHCHECK_GET_BYTES - 1}"}
+        async with self.client.request(
+            method,
+            self.settings.upstream + "/",
+            headers=headers,
+            allow_redirects=False,
+            timeout=timeout,
+        ) as response:
+            if method == "GET":
+                await response.content.read(self.HEALTHCHECK_GET_BYTES)
+            return int(response.status)
+
+    async def check_upstream(self) -> None:
+        """Probe readiness without downloading the protected application's homepage."""
+
+        started = time.monotonic()
+        now = datetime.now(timezone.utc).isoformat()
+        previous = self.upstream_health
+        probe_method = "HEAD"
+        try:
+            status = await self._probe_upstream(probe_method)
+            if status in self.HEALTHCHECK_FALLBACK_STATUSES:
+                probe_method = "GET"
+                status = await self._probe_upstream(probe_method)
+            healthy = status < 500
+            latency = round((time.monotonic() - started) * 1000, 1)
+            failures = 0 if healthy else int(previous.get("consecutive_failures", 0)) + 1
+            self.upstream_health = {
+                "healthy": healthy,
+                "status": status,
+                "latency_ms": latency,
+                "last_checked": now,
+                "last_success": now if healthy else previous.get("last_success"),
+                "last_failure": previous.get("last_failure") if healthy else now,
+                "consecutive_failures": failures,
+                "error": None if healthy else f"HTTP {status}",
+                "probe_method": probe_method,
+                "body_read_limit": self.HEALTHCHECK_GET_BYTES if probe_method == "GET" else 0,
+            }
+        except Exception as exc:
+            self.upstream_health = {
+                "healthy": False,
+                "status": None,
+                "latency_ms": round((time.monotonic() - started) * 1000, 1),
+                "last_checked": now,
+                "last_success": previous.get("last_success"),
+                "last_failure": now,
+                "consecutive_failures": int(previous.get("consecutive_failures", 0)) + 1,
+                "error": type(exc).__name__,
+                "probe_method": probe_method,
+                "body_read_limit": self.HEALTHCHECK_GET_BYTES if probe_method == "GET" else 0,
+            }
 
     def _prune_runtime_attackers(self, *, now: float | None = None) -> None:
         current = time.monotonic() if now is None else now

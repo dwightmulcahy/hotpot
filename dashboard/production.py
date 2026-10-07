@@ -11,6 +11,7 @@ from aiohttp import web
 from . import runtime as core
 from .geoip_enrichment import GeoIPEnricher
 from .network_intelligence import NetworkIntelligenceStore
+from .template import PRODUCTION_HTML
 
 
 class ProductionDashboard(core.Dashboard):
@@ -21,10 +22,15 @@ class ProductionDashboard(core.Dashboard):
         )
         self.housekeeping_interval_seconds = max(
             900.0,
-            float(os.getenv("HOTPOT_DASHBOARD_HOUSEKEEPING_INTERVAL_HOURS", "6")) * 3600.0,
+            float(os.getenv("HOTPOT_DASHBOARD_HOUSEKEEPING_INTERVAL_HOURS", "6"))
+            * 3600.0,
         )
         self.geoip_enrich_batch = max(
-            1, min(5000, int(os.getenv("HOTPOT_DASHBOARD_GEOIP_ENRICH_BATCH", "500")))
+            1,
+            min(
+                5000,
+                int(os.getenv("HOTPOT_DASHBOARD_GEOIP_ENRICH_BATCH", "500")),
+            ),
         )
         self._last_housekeeping = 0.0
         self.maintenance_errors = 0
@@ -38,39 +44,63 @@ class ProductionDashboard(core.Dashboard):
         self.geoip.close()
         await super().shutdown(app)
 
+    @staticmethod
+    def _status_error(instance, error: str) -> dict[str, Any]:
+        return {
+            "id": instance.instance_id,
+            "name": instance.name,
+            "healthy": False,
+            "error": error,
+            "uptime_seconds": 0,
+            "upstream": None,
+            "upstream_health": {},
+            "tarpits_active": 0,
+            "tarpits_total": 0,
+            "proxied": 0,
+            "telemetry_errors": 0,
+            "events_suppressed": 0,
+            "events_persisted": 0,
+            "version": "unknown",
+            "git_sha": "unknown",
+            "build_date": "unknown",
+            "source_id": None,
+            "event_cursor_max": 0,
+        }
+
     async def collect_status(self, instance) -> dict[str, Any]:
-        row = await super().collect_status(instance)
-        if row.get("error"):
-            row.update(
-                events_suppressed=0,
-                events_persisted=0,
-                version="unknown",
-                git_sha="unknown",
-                build_date="unknown",
-                source_id=None,
-            )
-            return row
+        """Fetch each Hotpot status document exactly once per refresh."""
+
         try:
             status = await self.fetch_json(f"{instance.url}/_hotpot/status")
-            stats = status.get("stats", {}) if isinstance(status, dict) else {}
-            row.update(
-                events_suppressed=int(stats.get("events_suppressed_total", 0) or 0),
-                events_persisted=int(stats.get("events_persisted_total", 0) or 0),
-                version=str(status.get("version", "unknown")),
-                git_sha=str(status.get("git_sha", "unknown")),
-                build_date=str(status.get("build_date", "unknown")),
-                source_id=status.get("source_id"),
-            )
-        except Exception:
-            row.update(
-                events_suppressed=0,
-                events_persisted=0,
-                version="unknown",
-                git_sha="unknown",
-                build_date="unknown",
-                source_id=None,
-            )
-        return row
+        except Exception as exc:
+            return self._status_error(instance, type(exc).__name__)
+
+        stats = status.get("stats", {}) if isinstance(status, dict) else {}
+        upstream_health = (
+            status.get("upstream_health", {}) if isinstance(status, dict) else {}
+        )
+        return {
+            "id": instance.instance_id,
+            "name": instance.name,
+            "healthy": bool(status.get("healthy", False)),
+            "error": None,
+            "uptime_seconds": int(status.get("uptime_seconds", 0) or 0),
+            "upstream": status.get("upstream"),
+            "upstream_health": upstream_health,
+            "tarpits_active": int(stats.get("tarpits_active", 0) or 0),
+            "tarpits_total": int(stats.get("tarpits_total", 0) or 0),
+            "proxied": int(stats.get("proxied", 0) or 0),
+            "telemetry_errors": int(stats.get("telemetry_errors", 0) or 0),
+            "events_suppressed": int(
+                stats.get("events_suppressed_total", 0) or 0
+            ),
+            "events_persisted": int(stats.get("events_persisted_total", 0) or 0),
+            "version": str(status.get("version", "unknown")),
+            "git_sha": str(status.get("git_sha", "unknown")),
+            "build_date": str(status.get("build_date", "unknown")),
+            "source_id": status.get("source_id"),
+            "event_cursor_max": int(status.get("event_cursor_max", 0) or 0),
+        }
 
     async def collect_events(self, instance) -> None:
         state = await self.store.cursor_state(instance.instance_id)
@@ -132,20 +162,8 @@ class ProductionDashboard(core.Dashboard):
             enriched["network"] = current
         return enriched
 
-    def _geoip_revision(self) -> str:
-        status = self.geoip.status()
-        databases = status.get("databases") or {}
-        parts: list[str] = []
-        for name in sorted(databases):
-            info = databases.get(name) or {}
-            parts.append(
-                f"{name}:{1 if info.get('present') else 0}:"
-                f"{int(info.get('mtime_ns', 0) or 0)}:{int(info.get('size', 0) or 0)}"
-            )
-        return "|".join(parts) or "geoip-unconfigured"
-
     async def _persist_network_attribution(self) -> dict[str, Any]:
-        revision = self._geoip_revision()
+        revision = self.geoip.revision()
         if not self.geoip.enabled:
             return {
                 "enabled": False,
@@ -153,10 +171,15 @@ class ProductionDashboard(core.Dashboard):
                 "batch_limit": self.geoip_enrich_batch,
                 "candidates": 0,
                 "updated": 0,
+                "backlog_remaining": 0,
+                "backlog_is_lower_bound": False,
             }
-        candidates = await self.store.network_enrichment_candidates(
-            revision, self.geoip_enrich_batch
-        )
+
+        # The store intentionally caps candidate scans at 5000. If that cap is
+        # reached, report the backlog as a lower bound rather than pretending it is
+        # an exact count. Normal installations will quickly fall below the cap.
+        backlog_scan = await self.store.network_enrichment_candidates(revision, 5000)
+        candidates = backlog_scan[: self.geoip_enrich_batch]
         records = [
             {
                 "identity_key": row["identity_key"],
@@ -167,12 +190,16 @@ class ProductionDashboard(core.Dashboard):
             for row in candidates
         ]
         updated = await self.store.update_network_attributions(records)
+        remaining = await self.store.network_enrichment_candidates(revision, 5000)
         return {
             "enabled": True,
             "revision": revision,
             "batch_limit": self.geoip_enrich_batch,
             "candidates": len(candidates),
             "updated": updated,
+            "backlog_before": len(backlog_scan),
+            "backlog_remaining": len(remaining),
+            "backlog_is_lower_bound": len(remaining) >= 5000,
         }
 
     async def _maybe_housekeep(self) -> None:
@@ -188,8 +215,12 @@ class ProductionDashboard(core.Dashboard):
             self.maintenance_errors += 1
 
     async def refresh(self) -> None:
-        await asyncio.gather(*(self.collect_events(instance) for instance in self.instances))
-        apps = await asyncio.gather(*(self.collect_status(instance) for instance in self.instances))
+        await asyncio.gather(
+            *(self.collect_events(instance) for instance in self.instances)
+        )
+        apps = await asyncio.gather(
+            *(self.collect_status(instance) for instance in self.instances)
+        )
         await self._maybe_housekeep()
         self.geoip.reload_if_changed()
         attribution = await self._persist_network_attribution()
@@ -204,20 +235,33 @@ class ProductionDashboard(core.Dashboard):
             self.enrich_attacker(row)
             for row in snapshot.get("top_lifetime_offenders", [])
         ]
-        snapshot["geoip"] = self.geoip.status()
+
+        network_intelligence = snapshot.get("network_intelligence") or {}
+        attribution["lifetime_attackers"] = int(
+            snapshot.get("summary", {}).get("lifetime_attackers", 0) or 0
+        )
+        attribution["attributed_attackers"] = int(
+            network_intelligence.get("attributed_attackers", 0) or 0
+        )
+        geoip_status = self.geoip.status()
+        geoip_status["attribution"] = attribution
+        snapshot["geoip"] = geoip_status
         snapshot["network_attribution"] = attribution
-        snapshot.setdefault("database", {})["maintenance_errors"] = self.maintenance_errors
+        snapshot.setdefault("database", {})[
+            "maintenance_errors"
+        ] = self.maintenance_errors
         async with self.cache_lock:
             self.cache = snapshot
 
     async def api_attacker(self, request: web.Request) -> web.Response:
         self.require_auth(request)
-        identity_key = (
-            request.query.get("key", "").strip()
-            or request.query.get("ip", "").strip()
-        )
+        identity_key = request.query.get("key", "").strip() or request.query.get(
+            "ip", ""
+        ).strip()
         if not identity_key:
-            raise web.HTTPBadRequest(text="key (or legacy ip) query parameter is required")
+            raise web.HTTPBadRequest(
+                text="key (or legacy ip) query parameter is required"
+            )
         result = await self.store.attacker_snapshot(identity_key)
         if result is None:
             raise web.HTTPNotFound(text="attacker not found")
@@ -264,33 +308,6 @@ class ProductionDashboard(core.Dashboard):
                 "Referrer-Policy": "no-referrer",
             },
         )
-
-
-PRODUCTION_HTML = core.HTML
-PRODUCTION_HTML = PRODUCTION_HTML.replace(
-    ".cards{display:grid;grid-template-columns:repeat(5,1fr);",
-    ".cards{display:grid;grid-template-columns:repeat(9,1fr);",
-)
-PRODUCTION_HTML = PRODUCTION_HTML.replace(
-    "['Active tarpits',s.active_tarpits]",
-    "['Active tarpits',s.active_tarpits],['Suppressed',s.suppressed_events||0],['Global L3+',s.level3_plus||0],['Lifetime attackers',s.lifetime_attackers||0],['DB MB',s.database_size_mb||0]",
-)
-PRODUCTION_HTML = PRODUCTION_HTML.replace(
-    "${fmt(a.proxied)} proxied · ${fmt(a.telemetry_errors)} telemetry errors",
-    "${fmt(a.proxied)} proxied · ${fmt(a.events_suppressed||0)} suppressed · ${fmt(a.telemetry_errors)} telemetry errors</div><div class=\"muted\">${esc(a.version||'unknown')} · ${esc((a.git_sha||'unknown').slice(0,7))}",
-)
-PRODUCTION_HTML = PRODUCTION_HTML.replace(
-    "<strong>${esc(o.ip)}</strong> · score ${fmt(o.score)} · ${fmt(o.hits)} hits · ${o.app_count} apps<div class=\"muted\">${esc(o.apps.join(', '))}</div>",
-    "<strong>${o.source_type==='cloudflare-worker'?'Cloudflare Worker · '+esc(o.worker_zone||'legacy/unknown zone'):esc(o.identity_key||o.ip)}</strong> · <strong>Global L${fmt(o.global_level||o.level)}</strong> · score ${fmt(o.global_score||o.score)} · ${fmt(o.hits)} hits<div class=\"muted\">${fmt(o.app_count)} apps · ${fmt(o.category_count)} categories · ${esc((o.apps||[]).join(', '))}</div>${o.network?.enriched?'<div class=\"muted\">'+(o.source_type==='cloudflare-worker'?'Observed via '+esc(o.client_ip||'Cloudflare shared address')+' · ':'')+(o.network.asn?'AS'+esc(o.network.asn)+' · ':'')+esc(o.network.provider||'')+(o.network.country?' · '+esc(o.network.country):'')+(o.network.city?' · '+esc(o.network.city):'')+'</div>':''}<div class=\"muted\">Lifetime ${fmt(o.lifetime?.lifetime_hits||o.hits)} hits${o.lifetime?.first_seen?' · first '+esc(new Date(o.lifetime.first_seen).toLocaleDateString()):''}</div>",
-)
-PRODUCTION_HTML = PRODUCTION_HTML.replace(
-    '</section></div><div class="grid"><section class="panel"><h3>Recent activity',
-    '</section></div><div class="grid"><section class="panel"><h3>Top networks / ASNs</h3><div id="networks"></div></section><section class="panel"><h3>Top countries</h3><div id="countries"></div></section></div><div class="grid"><section class="panel"><h3>Recent activity',
-)
-PRODUCTION_HTML = PRODUCTION_HTML.replace(
-    "document.getElementById('recent').innerHTML=",
-    "document.getElementById('networks').innerHTML=(d.network_intelligence?.top_networks||[]).map(n=>{const detail=n.asn!=null?'/api/network?asn='+encodeURIComponent(n.asn):'/api/network?provider='+encodeURIComponent(n.provider||'');const apps=(n.top_apps||[]).slice(0,3).map(x=>x.instance_name).join(', ');const cats=(n.top_categories||[]).slice(0,3).map(x=>x.category).join(', ');return `<div style=\"padding:7px 0;border-bottom:1px solid #202b40\"><strong>${n.asn!=null?'AS'+esc(n.asn)+' · ':''}${esc(n.provider||'Unknown provider')}</strong> · ${fmt(n.hits)} hits · ${fmt(n.attackers)} attackers <a class=\"muted\" href=\"${esc(detail)}\">details</a><div class=\"muted\">${fmt(n.level3_plus)} L3+ · ${fmt(n.level4)} L4${apps?' · Targets: '+esc(apps):''}</div>${cats?'<div class=\"muted\">Top probes: '+esc(cats)+'</div>':''}</div>`}).join('')||'<span class=\"muted\">No attributed networks yet</span>';document.getElementById('countries').innerHTML=(d.network_intelligence?.top_countries||[]).map(c=>{const detail='/api/network?country='+encodeURIComponent(c.country_code||'');const apps=(c.top_apps||[]).slice(0,2).map(x=>x.instance_name).join(', ');return `<div style=\"padding:7px 0;border-bottom:1px solid #202b40\"><strong>${esc(c.country||c.country_code||'Unknown')}</strong> · ${fmt(c.hits)} hits · ${fmt(c.attackers)} attackers <a class=\"muted\" href=\"${esc(detail)}\">details</a><div class=\"muted\">${fmt(c.level3_plus)} L3+ · ${fmt(c.level4)} L4${apps?' · Targets: '+esc(apps):''}</div></div>`}).join('')||'<span class=\"muted\">No attributed countries yet</span>';document.getElementById('recent').innerHTML=",
-)
 
 
 def build_app() -> web.Application:
