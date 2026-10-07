@@ -136,7 +136,7 @@ class DashboardProductionTests(unittest.IsolatedAsyncioTestCase):
         dockerfile = (root / "Dockerfile.dashboard").read_text(encoding="utf-8")
         self.assertIn("COPY sitecustomize.py ./sitecustomize.py", dockerfile)
         self.assertIn(
-            'CMD ["python", "-m", "dashboard.observability_production"]',
+            'CMD ["python", "-m", "dashboard.routed_production"]',
             dockerfile,
         )
 

@@ -16,6 +16,24 @@ def env_csv(name: str, default: str = "") -> tuple[str, ...]:
     return tuple(v.strip() for v in os.getenv(name, default).split(",") if v.strip())
 
 
+def env_secret(name: str) -> str | None:
+    """Read a secret from NAME_FILE when configured, otherwise from NAME.
+
+    The file-backed form intentionally takes precedence so Docker/Container Station
+    deployments can keep credentials out of the container environment shown by
+    ``docker inspect``. Empty values are treated as unset.
+    """
+
+    file_name = os.getenv(f"{name}_FILE", "").strip()
+    if file_name:
+        try:
+            value = Path(file_name).read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise RuntimeError(f"Could not read {name}_FILE: {exc}") from exc
+        return value or None
+    return os.getenv(name, "").strip() or None
+
+
 @dataclass(frozen=True)
 class Settings:
     bind: str
@@ -78,7 +96,7 @@ class Settings:
             tarpit_chunk_delay=float(os.getenv("HOTPOT_TARPIT_CHUNK_DELAY", "2.0")),
             tarpit_max_seconds=float(os.getenv("HOTPOT_TARPIT_MAX_SECONDS", "20")),
             tarpit_escalated_max_seconds=float(os.getenv("HOTPOT_TARPIT_ESCALATED_MAX_SECONDS", "60")),
-            admin_token=os.getenv("HOTPOT_ADMIN_TOKEN") or None,
+            admin_token=env_secret("HOTPOT_ADMIN_TOKEN"),
             allow_cidrs=env_csv("HOTPOT_ALLOW_CIDRS"),
             retention_days=max(1, int(os.getenv("HOTPOT_RETENTION_DAYS", "30"))),
             attacker_retention_days=max(1, int(os.getenv("HOTPOT_ATTACKER_RETENTION_DAYS", "90"))),
@@ -86,12 +104,12 @@ class Settings:
             notify_min_level=min(4, max(1, int(os.getenv("HOTPOT_NOTIFY_MIN_LEVEL", "3")))),
             notify_cooldown_seconds=max(60, int(os.getenv("HOTPOT_NOTIFY_COOLDOWN_SECONDS", "3600"))),
             notify_webhook_url=os.getenv("HOTPOT_NOTIFY_WEBHOOK_URL") or None,
-            notify_webhook_bearer=os.getenv("HOTPOT_NOTIFY_WEBHOOK_BEARER") or None,
+            notify_webhook_bearer=env_secret("HOTPOT_NOTIFY_WEBHOOK_BEARER"),
             smtp_host=os.getenv("HOTPOT_SMTP_HOST") or None,
             smtp_port=int(os.getenv("HOTPOT_SMTP_PORT", "587")),
             smtp_starttls=env_bool("HOTPOT_SMTP_STARTTLS", True),
             smtp_username=os.getenv("HOTPOT_SMTP_USERNAME") or None,
-            smtp_password=os.getenv("HOTPOT_SMTP_PASSWORD") or None,
+            smtp_password=env_secret("HOTPOT_SMTP_PASSWORD"),
             smtp_from=os.getenv("HOTPOT_SMTP_FROM") or None,
             smtp_to=env_csv("HOTPOT_SMTP_TO"),
             instance_id=instance_id,
