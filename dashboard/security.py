@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import hmac
 import json
@@ -132,7 +133,13 @@ class SessionManager:
             username = str(raw.get("u") or "hotpot")
             session_id = str(raw.get("sid") or "")
             expires = int(raw.get("exp", 0))
-        except (ValueError, TypeError, UnicodeDecodeError, json.JSONDecodeError):
+        except (
+            ValueError,
+            TypeError,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            binascii.Error,
+        ):
             return None
         if version != 1 or not session_id or expires <= int(time.time()):
             return None
