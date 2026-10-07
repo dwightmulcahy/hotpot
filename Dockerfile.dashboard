@@ -12,8 +12,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 RUN addgroup -S hotpot && adduser -S -G hotpot -u 10001 hotpot
 WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements-core.txt requirements-dashboard.txt ./
+RUN pip install --no-cache-dir -r requirements-dashboard.txt
 COPY sitecustomize.py ./sitecustomize.py
 COPY dashboard ./dashboard
 RUN mkdir -p /data && chown -R hotpot:hotpot /data /app
