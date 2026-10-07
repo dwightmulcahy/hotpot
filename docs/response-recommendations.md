@@ -39,7 +39,45 @@ Approval is durable. If Hotpot stops after recording `approved` but before compl
 
 When `enforcement_expires_at` is reached, the dashboard deletes each stored Cloudflare rule. If deletion fails, the recommendation remains `applied`, the error is recorded, and later refreshes retry removal. A Cloudflare `404` during deletion is treated as already removed.
 
-The dashboard also provides **Remove now** for an applied enforcement. If the actor is still active and still meets policy after early removal, a new recommendation can appear later.
+The dashboard also provides **Remove now** for an applied enforcement. If the actor is still active and still meets policy after early removal, a new recommendation can appear later. Active-rule cards show a live relative countdown while retaining the absolute expiration time in the detail/tooltip.
+
+## Cloudflare reconciliation
+
+Hotpot periodically performs a **read-only reconciliation** between applied enforcement stored in `dashboard.sqlite3` and the live Cloudflare custom-WAF entrypoint. Reconciliation never creates, repairs, changes, or deletes a rule by itself.
+
+For each applied recommendation Hotpot verifies the deterministic rule reference, Cloudflare rule ID, ruleset ID, action, expression, and enabled state. The dashboard reports:
+
+- `healthy`: the live Cloudflare rule matches the persisted Hotpot rule
+- `drifted`: the rule exists but was changed, disabled, or moved to a different ID/ruleset
+- `missing`: Hotpot believes the rule is applied but the expected rule is absent
+- `error`: Cloudflare could not be read for that rule/zone
+- `orphaned`: a `hotpot_...` rule exists in a configured or previously-used zone but no current applied recommendation owns it
+
+The default reconciliation interval is 300 seconds and can be changed with `HOTPOT_CLOUDFLARE_RECONCILE_SECONDS` (minimum 60 seconds). The Enforcement tab also has **Reconcile now**, which performs the same read-only comparison immediately.
+
+A successful approval triggers an immediate reconciliation so the dashboard can confirm that the newly applied rule exists. A successful manual removal also triggers a fresh read.
+
+## Durable enforcement audit trail
+
+Enforcement lifecycle events are written to the additive `response_audit_log` table in `dashboard.sqlite3`. The audit trail records recommendation creation, approval, apply success/failure, manual or automatic removal, removal failures, reconciliation issues/resolution, and orphan detection/resolution.
+
+Audit entries store timestamps, recommendation/actor references where applicable, a human-readable message, and bounded JSON details such as Cloudflare rule identifiers. Repeated reconciliation checks do not continuously duplicate the same issue in the audit log; a new audit event is written when the reconciliation state changes.
+
+The Enforcement tab reads the permanent audit trail from `/api/audit` instead of reconstructing history from current recommendation states.
+
+## Operational system self-test
+
+The Operations tab includes **Run system check**. It is non-destructive and checks:
+
+- authenticated `/_hotpot/status` access and health for every protected instance
+- authenticated event API access for every protected instance
+- SQLite `quick_check` plus a transaction that is rolled back after verifying write access
+- configured GeoIP databases and load errors
+- Cloudflare target mappings
+- read-only access to each configured Cloudflare custom-WAF entrypoint; a zone with no entrypoint yet is still considered accessible
+- recorded housekeeping state and maintenance errors
+
+The system check does not create a test WAF rule and does not change Cloudflare configuration.
 
 ## Cloudflare implementation
 
@@ -64,6 +102,8 @@ GET  /api/recommendations
 GET  /api/recommendations?status=applied
 GET  /api/recommendations?status=failed
 GET  /api/recommendation?id=<recommendation_id>
+GET  /api/audit
+GET  /api/audit?recommendation_id=<recommendation_id>&limit=100
 
 POST /api/recommendation/<recommendation_id>/dismiss
      X-Hotpot-Action: dismiss
@@ -73,9 +113,15 @@ POST /api/recommendation/<recommendation_id>/approve
 
 POST /api/recommendation/<recommendation_id>/remove
      X-Hotpot-Action: remove
+
+POST /api/enforcement/reconcile
+     X-Hotpot-Action: reconcile
+
+POST /api/system-check
+     X-Hotpot-Action: system-check
 ```
 
-There is no automatic approval endpoint. Hotpot will automatically **remove** an already approved/applied rule at expiry, but it will not automatically approve or create a new enforcement rule.
+There is no automatic approval endpoint. Hotpot will automatically **remove** an already approved/applied rule at expiry, but it will not automatically approve or create a new enforcement rule. Reconciliation is detection-only; it does not automatically repair drift or remove orphaned rules.
 
 ## Configuration
 
@@ -94,6 +140,7 @@ Cloudflare enforcement is opt-in and disabled by default:
 ```dotenv
 HOTPOT_CLOUDFLARE_ENFORCEMENT_ENABLED=false
 HOTPOT_CLOUDFLARE_API_TOKEN=REPLACE_WITH_ZONE_WAF_WRITE_TOKEN
+HOTPOT_CLOUDFLARE_RECONCILE_SECONDS=300
 HOTPOT_CLOUDFLARE_TARGETS={"monkeyhead":{"zone_id":"ZONE_ID","hosts":["www.monkeyheadbrewing.com"]},"watersolver":{"zone_id":"ZONE_ID","hosts":["brewwatersolver.com","www.brewwatersolver.com"]},"hvac":{"zone_id":"ZONE_ID","hosts":["hvac.bytemeloser.com"]},"tapmenu":{"zone_id":"ZONE_ID","hosts":["tapmenu.bytemeloser.com"]}}
 ```
 
@@ -105,4 +152,4 @@ Enable enforcement only after the token and target mapping are complete:
 HOTPOT_CLOUDFLARE_ENFORCEMENT_ENABLED=true
 ```
 
-No database reset is required. The migration is additive.
+No database reset is required. All reconciliation and audit migrations are additive.

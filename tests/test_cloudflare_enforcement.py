@@ -67,6 +67,7 @@ class FakeCloudflareEnforcer(CloudflareEnforcer):
                         "ref": "hotpot_rec123_zone1234",
                         "action": "block",
                         "expression": '(ip.src eq 8.8.8.8) and (http.host eq "www.example.com")',
+                        "enabled": True,
                     }
                 ]
             return 200, {
@@ -110,6 +111,7 @@ class CloudflareEnforcerTests(unittest.IsolatedAsyncioTestCase):
     def recommendation(self):
         return {
             "recommendation_id": "rec123",
+            "actor_key": "8.8.8.8",
             "action": "recommend_block",
             "target_type": "ip",
             "target_value": "8.8.8.8",
@@ -133,6 +135,42 @@ class CloudflareEnforcerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(enforcer.created, 0)
         self.assertTrue(rules[0]["reused"])
         self.assertEqual(rules[0]["rule_id"], "rule-existing")
+
+    async def test_reconcile_confirms_expected_rule(self) -> None:
+        enforcer = FakeCloudflareEnforcer(self.config(), existing=True)
+        rules = await enforcer.apply(self.recommendation())
+        recommendation = {**self.recommendation(), "enforcement_rules": rules}
+        report = await enforcer.reconcile([recommendation])
+        self.assertEqual(report["status"], "healthy")
+        self.assertEqual(report["counts"]["healthy"], 1)
+        self.assertEqual(report["orphaned"], 0)
+        self.assertEqual(
+            report["recommendations"][0]["rules"][0]["status"], "healthy"
+        )
+
+    async def test_reconcile_detects_missing_and_orphaned_rules(self) -> None:
+        expected = {
+            **self.recommendation(),
+            "enforcement_rules": [
+                {
+                    "zone_id": "zone123456",
+                    "ruleset_id": "ruleset-1",
+                    "rule_id": "rule-existing",
+                    "ref": "hotpot_rec123_zone1234",
+                    "action": "block",
+                    "expression": '(ip.src eq 8.8.8.8) and (http.host eq "www.example.com")',
+                }
+            ],
+        }
+        missing = await FakeCloudflareEnforcer(self.config()).reconcile([expected])
+        self.assertEqual(missing["counts"]["missing"], 1)
+        self.assertEqual(missing["status"], "drifted")
+
+        orphaned = await FakeCloudflareEnforcer(
+            self.config(), existing=True
+        ).reconcile([])
+        self.assertEqual(orphaned["orphaned"], 1)
+        self.assertEqual(orphaned["orphans"][0]["ref"], "hotpot_rec123_zone1234")
 
 
 class EnforcementStoreTests(unittest.IsolatedAsyncioTestCase):
@@ -189,6 +227,9 @@ class EnforcementStoreTests(unittest.IsolatedAsyncioTestCase):
                         "zone_id": "zone-1",
                         "ruleset_id": "ruleset-1",
                         "rule_id": "rule-1",
+                        "ref": "hotpot_test_zone1",
+                        "action": "block",
+                        "expression": '(ip.src eq 8.8.8.8) and (http.host eq "www.example.com")',
                     }
                 ],
             )
@@ -196,6 +237,58 @@ class EnforcementStoreTests(unittest.IsolatedAsyncioTestCase):
             assert applied is not None
             self.assertEqual(applied["status"], "applied")
             self.assertEqual(applied["enforcement_rules"][0]["rule_id"], "rule-1")
+
+            drift_report = {
+                "checked_at": datetime.now(timezone.utc).isoformat(),
+                "status": "drifted",
+                "counts": {"healthy": 0, "drifted": 0, "missing": 1, "error": 0},
+                "recommendations": [
+                    {
+                        "recommendation_id": rec["recommendation_id"],
+                        "actor_key": "8.8.8.8",
+                        "status": "missing",
+                        "rules": [
+                            {
+                                "zone_id": "zone-1",
+                                "ref": "hotpot_test_zone1",
+                                "status": "missing",
+                                "detail": "expected Hotpot rule was not found",
+                            }
+                        ],
+                    }
+                ],
+                "orphans": [],
+                "orphaned": 0,
+                "zone_errors": [],
+                "zones_checked": 1,
+            }
+            await store.record_reconciliation(drift_report)
+            drifted = await store.recommendation(rec["recommendation_id"])
+            assert drifted is not None
+            self.assertEqual(drifted["reconciliation_status"], "missing")
+
+            healthy_report = {
+                **drift_report,
+                "checked_at": datetime.now(timezone.utc).isoformat(),
+                "status": "healthy",
+                "counts": {"healthy": 1, "drifted": 0, "missing": 0, "error": 0},
+                "recommendations": [
+                    {
+                        "recommendation_id": rec["recommendation_id"],
+                        "actor_key": "8.8.8.8",
+                        "status": "healthy",
+                        "rules": [
+                            {
+                                "zone_id": "zone-1",
+                                "ref": "hotpot_test_zone1",
+                                "status": "healthy",
+                                "detail": "matches persisted Hotpot rule",
+                            }
+                        ],
+                    }
+                ],
+            }
+            await store.record_reconciliation(healthy_report)
 
             # An actor with active enforcement must not immediately get a second
             # pending recommendation on the next dashboard refresh.
@@ -218,13 +311,24 @@ class EnforcementStoreTests(unittest.IsolatedAsyncioTestCase):
 
             due = await store.due_removals()
             self.assertEqual(len(due), 1)
-            expired = await store.mark_removal_result(
-                rec["recommendation_id"], []
-            )
+            expired = await store.mark_removal_result(rec["recommendation_id"], [])
             self.assertIsNotNone(expired)
             assert expired is not None
             self.assertEqual(expired["status"], "expired")
             self.assertIsNotNone(expired["removed_at"])
+
+            audit = await store.audit_log(limit=50)
+            event_types = {row["event_type"] for row in audit}
+            self.assertIn("recommendation_created", event_types)
+            self.assertIn("approved", event_types)
+            self.assertIn("applied", event_types)
+            self.assertIn("reconciliation_issue", event_types)
+            self.assertIn("reconciliation_resolved", event_types)
+            self.assertIn("removed", event_types)
+
+            storage = await store.storage_self_check()
+            self.assertTrue(storage["writable"])
+            self.assertEqual(storage["quick_check"].lower(), "ok")
 
     async def test_approval_rechecks_allowlist(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
