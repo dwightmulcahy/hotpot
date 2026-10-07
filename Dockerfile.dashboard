@@ -19,4 +19,4 @@ COPY dashboard ./dashboard
 RUN mkdir -p /data && chown -R hotpot:hotpot /data /app
 USER 10001:10001
 EXPOSE 19090
-CMD ["python", "-m", "dashboard.production"]
+CMD ["python", "-m", "dashboard.secure_production"]
