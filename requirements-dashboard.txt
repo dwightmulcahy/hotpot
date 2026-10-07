@@ -1,0 +1,2 @@
+-r requirements-core.txt
+geoip2>=5.0,<6.0
