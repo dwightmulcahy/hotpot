@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import json
+import sys
+
 from aiohttp import web
 
 from .app import HOTPOT_APP_KEY
 from .config import Settings
 from .metrics import PROMETHEUS_CONTENT_TYPE, render_prometheus
+from .preflight import run_preflight
 from .server import build_app as build_server_app
 
 
@@ -35,6 +39,13 @@ def build_app(settings: Settings | None = None) -> web.Application:
 
 
 def main() -> None:
+    report = run_preflight()
+    if "--check-config" in sys.argv[1:]:
+        print(json.dumps(report, indent=2, sort_keys=True))
+        raise SystemExit(0 if report["ok"] else 2)
+    if not report["ok"]:
+        raise RuntimeError("Hotpot configuration preflight failed: " + json.dumps(report))
+
     settings = Settings.from_env()
     web.run_app(
         build_app(settings),
