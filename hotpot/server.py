@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import hmac
 import json
 import os
 import sqlite3
@@ -17,6 +16,7 @@ from .app import HOTPOT_APP_KEY, Hotpot, clean_headers
 from .config import Settings
 from .intelligence import classify, escalation_for
 from .network import Allowlist, ClientIPResolver
+from .notification_spool import NotificationSpool
 from .notifications import Notifier
 from .rate_limit import EventRateLimiter
 from .rules import RuleEngine
@@ -30,13 +30,7 @@ from .telemetry import BoundedTelemetryQueue, TelemetryWork
 
 
 class HotpotServer(Hotpot):
-    """Single production Hotpot runtime.
-
-    Historical runtime/production/gateway/durable_gateway modules now re-export this
-    class for compatibility. Production policy is intentionally centralized here and
-    stateful subsystems are composed explicitly instead of being injected through a
-    deep inheritance chain or module-level monkey patches.
-    """
+    """Single production Hotpot runtime with explicitly composed subsystems."""
 
     HEALTHCHECK_FALLBACK_STATUSES = {405, 501}
     HEALTHCHECK_GET_BYTES = 1024
@@ -54,6 +48,7 @@ class HotpotServer(Hotpot):
         self.client: ClientSession | None = None
         self.housekeeping_task: asyncio.Task | None = None
         self.health_task: asyncio.Task | None = None
+        self.notification_retry_task: asyncio.Task | None = None
         self.tarpit_slots = asyncio.Semaphore(settings.tarpit_max_concurrent)
         self.intelligence_lock = asyncio.Lock()
         self.stats = Counter()
@@ -114,12 +109,25 @@ class HotpotServer(Hotpot):
         self.resources = ResourceBudget.from_env(
             max_request_body=settings.max_request_body
         )
+        telemetry_capacity = max(
+            32, int(os.getenv("HOTPOT_TELEMETRY_QUEUE_MAX", "2048"))
+        )
+        notify_reserve = max(
+            1, int(os.getenv("HOTPOT_TELEMETRY_NOTIFY_RESERVE", "128"))
+        )
         self.telemetry_queue = BoundedTelemetryQueue(
-            capacity=max(32, int(os.getenv("HOTPOT_TELEMETRY_QUEUE_MAX", "2048"))),
+            capacity=telemetry_capacity,
             drain_timeout=max(
                 0.1,
                 float(os.getenv("HOTPOT_TELEMETRY_DRAIN_TIMEOUT_SECONDS", "5")),
             ),
+            notify_reserve=notify_reserve,
+        )
+        self.notification_retry_seconds = max(
+            10, int(os.getenv("HOTPOT_NOTIFICATION_RETRY_SECONDS", "60"))
+        )
+        self.notification_spool = NotificationSpool(
+            settings.data_dir, retry_seconds=self.notification_retry_seconds
         )
 
         for key in (
@@ -138,6 +146,10 @@ class HotpotServer(Hotpot):
             "telemetry_queue_dropped",
             "telemetry_queue_dropped_jsonl",
             "telemetry_queue_dropped_notify",
+            "notification_spool_enqueued",
+            "notification_spool_retry_sent",
+            "notification_spool_retry_errors",
+            "notification_spool_suppressed",
         ):
             self.stats[key] = 0
         if self.store.inner is None:
@@ -165,8 +177,16 @@ class HotpotServer(Hotpot):
             self.health_loop(), name="hotpot-upstream-health"
         )
         await self.telemetry_queue.start(self._process_telemetry_work)
+        self.notification_retry_task = asyncio.create_task(
+            self._notification_retry_loop(), name="hotpot-notification-retry"
+        )
 
     async def shutdown(self, app: web.Application) -> None:
+        if self.notification_retry_task:
+            self.notification_retry_task.cancel()
+            await asyncio.gather(
+                self.notification_retry_task, return_exceptions=True
+            )
         await self.telemetry_queue.stop()
         if self.health_task:
             self.health_task.cancel()
@@ -413,6 +433,7 @@ class HotpotServer(Hotpot):
                     and self.settings.smtp_to
                 ),
             },
+            "notification_spool": await self.notification_spool.snapshot(),
             "telemetry_queue": self.telemetry_queue.snapshot(),
             "stats": dict(self.stats),
             "intelligence": {
@@ -541,7 +562,11 @@ class HotpotServer(Hotpot):
                     await response.write(chunk)
                 await response.write_eof()
                 return response
-        except (web.HTTPRequestEntityTooLarge, web.HTTPRequestTimeout, web.HTTPServiceUnavailable):
+        except (
+            web.HTTPRequestEntityTooLarge,
+            web.HTTPRequestTimeout,
+            web.HTTPServiceUnavailable,
+        ):
             raise
         except Exception as exc:
             self.stats["upstream_errors"] += 1
@@ -664,9 +689,30 @@ class HotpotServer(Hotpot):
         if level < self.settings.notify_min_level:
             return
         if self.telemetry_queue.running:
-            self._submit_telemetry("notify", event)
+            if not self._submit_telemetry("notify", event):
+                await self.notification_spool.enqueue(
+                    event, claimed=False, error="telemetry notification queue full"
+                )
+                self.stats["notification_spool_enqueued"] += 1
             return
         await self._notify_direct(event)
+
+    async def _send_notification(self, event: dict) -> None:
+        assert self.client is not None
+        channels = await self.notifier.send(self.client, event)
+        self.stats["notifications_sent"] += 1
+        await self._write_event_direct(
+            {
+                "event": "notification_sent",
+                "client_ip": event.get("client_ip", "unknown"),
+                "attacker_key": event.get("attacker_key")
+                or event.get("client_ip", "unknown"),
+                "source_type": event.get("source_type", "ip"),
+                "worker_zone": event.get("worker_zone"),
+                "escalation_level": int(event.get("escalation_level", 1)),
+                "channels": channels,
+            }
+        )
 
     async def _notify_direct(self, event: dict) -> None:
         if not self.notifier.enabled:
@@ -674,35 +720,27 @@ class HotpotServer(Hotpot):
         level = int(event.get("escalation_level", 1))
         if level < self.settings.notify_min_level:
             return
-        actor_key = str(event.get("attacker_key") or event.get("client_ip", "unknown"))
+        actor_key = str(
+            event.get("attacker_key") or event.get("client_ip", "unknown")
+        )
+        claimed = False
         try:
             should_send = await self.store.claim_notification(
                 actor_key, level, self.settings.notify_cooldown_seconds
             )
-        except Exception:
-            self.stats["telemetry_errors"] += 1
-            self.stats["notification_state_errors"] += 1
-            return
-        if not should_send:
-            self.stats["notifications_suppressed"] += 1
-            return
-        assert self.client is not None
-        try:
-            channels = await self.notifier.send(self.client, event)
-            self.stats["notifications_sent"] += 1
-            await self._write_event_direct(
-                {
-                    "event": "notification_sent",
-                    "client_ip": event.get("client_ip", "unknown"),
-                    "attacker_key": actor_key,
-                    "source_type": event.get("source_type", "ip"),
-                    "worker_zone": event.get("worker_zone"),
-                    "escalation_level": level,
-                    "channels": channels,
-                }
-            )
+            if not should_send:
+                self.stats["notifications_suppressed"] += 1
+                return
+            claimed = True
+            await self._send_notification(event)
         except Exception as exc:
             self.stats["notification_errors"] += 1
+            await self.notification_spool.enqueue(
+                event,
+                claimed=claimed,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            self.stats["notification_spool_enqueued"] += 1
             await self._write_event_direct(
                 {
                     "event": "notification_error",
@@ -712,8 +750,52 @@ class HotpotServer(Hotpot):
                     "worker_zone": event.get("worker_zone"),
                     "escalation_level": level,
                     "error": type(exc).__name__,
+                    "spooled": True,
                 }
             )
+
+    async def _notification_retry_loop(self) -> None:
+        while True:
+            try:
+                await asyncio.sleep(self.notification_retry_seconds)
+                await self._retry_spooled_notifications()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self.stats["notification_spool_retry_errors"] += 1
+
+    async def _retry_spooled_notifications(self) -> None:
+        if not self.notifier.enabled or self.client is None:
+            return
+        for job in await self.notification_spool.due(limit=25):
+            job_id = int(job["id"])
+            event = dict(job.get("event") or {})
+            claimed = bool(job.get("claimed"))
+            try:
+                if not claimed:
+                    actor_key = str(
+                        event.get("attacker_key")
+                        or event.get("client_ip", "unknown")
+                    )
+                    level = int(event.get("escalation_level", 1))
+                    should_send = await self.store.claim_notification(
+                        actor_key, level, self.settings.notify_cooldown_seconds
+                    )
+                    if not should_send:
+                        await self.notification_spool.mark_done(
+                            job_id, status="suppressed"
+                        )
+                        self.stats["notification_spool_suppressed"] += 1
+                        continue
+                    await self.notification_spool.mark_claimed(job_id)
+                await self._send_notification(event)
+                await self.notification_spool.mark_done(job_id, status="sent")
+                self.stats["notification_spool_retry_sent"] += 1
+            except Exception as exc:
+                await self.notification_spool.mark_error(
+                    job_id, f"{type(exc).__name__}: {exc}"
+                )
+                self.stats["notification_spool_retry_errors"] += 1
 
     async def deception(self, request: web.Request, rule) -> web.StreamResponse:
         identity = self.client_identity(request)
