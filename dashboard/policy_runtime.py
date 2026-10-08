@@ -9,6 +9,7 @@ from aiohttp import web
 
 from . import runtime as core
 from .api_v1 import register_api_routes
+from .deployment import collect_deployment_report
 from .policy import PolicyManager
 from .server import (
     DASHBOARD_HTML as BASE_DASHBOARD_HTML,
@@ -18,7 +19,7 @@ from .server import (
 
 
 def policy_dashboard_page() -> str:
-    """Attach policy assets to the already composed production dashboard page."""
+    """Attach policy and deployment assets to the composed production dashboard."""
 
     head, head_marker, remainder = BASE_DASHBOARD_HTML.partition("</head>")
     if not head_marker:
@@ -29,9 +30,11 @@ def policy_dashboard_page() -> str:
     return (
         head
         + '<link rel="stylesheet" href="/static/policy.css">\n'
+        + '<link rel="stylesheet" href="/static/deployment.css">\n'
         + head_marker
         + body
         + '<script src="/static/policy.js"></script>\n'
+        + '<script src="/static/deployment.js"></script>\n'
         + body_marker
         + tail
     )
@@ -41,7 +44,7 @@ POLICY_DASHBOARD_HTML = policy_dashboard_page()
 
 
 class PolicyDashboardApplication(DashboardApplication):
-    """Dashboard application with a durable, reconciled security-policy control plane."""
+    """Dashboard application with policy and deployment visibility."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -130,6 +133,11 @@ class PolicyDashboardApplication(DashboardApplication):
                     )
                 )
         return await super().api_approve_recommendation(request)
+
+    async def api_deployment(self, request: web.Request) -> web.Response:
+        self.require_auth(request)
+        report = await collect_deployment_report(self)
+        return web.json_response(report, headers={"Cache-Control": "no-store"})
 
     async def api_policies(self, request: web.Request) -> web.Response:
         self.require_auth(request)
@@ -317,6 +325,8 @@ def build_app() -> web.Application:
     app.router.add_get("/api/audit", dashboard.api_audit)
     app.router.add_get("/api/notifications", dashboard.api_notifications)
     app.router.add_get("/api/enforcement/cleanup-jobs", dashboard.api_cleanup_jobs)
+    app.router.add_get("/api/deployment", dashboard.api_deployment)
+    app.router.add_get("/api/v1/deployment", dashboard.api_deployment)
     app.router.add_post("/api/notifications/test", dashboard.api_notification_test)
     app.router.add_post(
         "/api/recommendation/{recommendation_id}/dismiss",
