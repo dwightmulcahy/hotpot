@@ -7,6 +7,7 @@ from aiohttp import web
 
 from .app import HOTPOT_APP_KEY
 from .config import Settings
+from .digest_notifications import DigestAwareNotifier
 from .metrics import PROMETHEUS_CONTENT_TYPE, render_prometheus
 from .preflight import run_preflight
 from .server import build_app as build_server_app
@@ -34,6 +35,8 @@ async def metrics_middleware(
 
 def build_app(settings: Settings | None = None) -> web.Application:
     app = build_server_app(settings)
+    hotpot = app[HOTPOT_APP_KEY]
+    hotpot.notifier = DigestAwareNotifier(hotpot.settings)
     app.middlewares.insert(0, metrics_middleware)
     return app
 
