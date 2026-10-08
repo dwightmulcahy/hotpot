@@ -94,3 +94,59 @@
   }
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>{if(!attach())setTimeout(attach,250)});else if(!attach())setTimeout(attach,250);
 })();
+
+(()=>{
+  let metricWindow='1h',metricPayload=null;
+  const metricDefs=[
+    ['Request rate','request_rate_per_minute','/min'],
+    ['L4 activity','level4_total',''],
+    ['Queue depth','telemetry_queue_depth',''],
+    ['Spool pending','notification_spool_pending',''],
+    ['Upstream saturation','resource_upstream_saturation','%'],
+    ['Upstream latency','upstream_latency_ms','ms']
+  ];
+
+  function ensureMetricPanel(){
+    if(document.getElementById('hotpotMetricTrends'))return;
+    const view=document.getElementById('view-operations');if(!view)return;
+    const apps=document.getElementById('apps')?.closest('section.panel');
+    const panel=document.createElement('section');panel.id='hotpotMetricTrends';panel.className='panel';panel.style.marginTop='12px';
+    panel.innerHTML='<div class="panel-head"><div><div class="section-kicker">Operational telemetry</div><h2>Health & traffic trends</h2></div><div class="actions" style="margin-top:0"><button class="btn ghost" data-metric-window="1h">1h</button><button class="btn ghost" data-metric-window="24h">24h</button><button class="btn ghost" data-metric-window="7d">7d</button></div></div><div id="metricTrendGrid" class="mini-grid"><div class="empty">Collecting trend samples…</div></div><div id="metricTrendNote" class="view-note" style="margin-top:9px"></div>';
+    if(apps)apps.insertAdjacentElement('afterend',panel);else view.prepend(panel);
+  }
+
+  function sparkline(values){
+    const width=180,height=42,pad=3;
+    if(!values.length)return '<div class="empty">No samples</div>';
+    const nums=values.map(v=>Number(v)||0),min=Math.min(...nums),max=Math.max(...nums),span=Math.max(1e-9,max-min);
+    const points=nums.map((v,i)=>`${pad+(i*(width-pad*2))/Math.max(1,nums.length-1)},${height-pad-((v-min)*(height-pad*2))/span}`).join(' ');
+    return `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="trend" style="width:100%;height:42px"><polyline points="${points}" fill="none" stroke="currentColor" stroke-width="2" vector-effect="non-scaling-stroke"/></svg>`;
+  }
+
+  function displayValue(key,value,suffix){
+    const n=Number(value)||0;
+    if(suffix==='%')return (n*100).toFixed(1)+'%';
+    if(suffix==='ms')return n.toFixed(1)+' ms';
+    if(suffix==='/min')return n.toFixed(2)+'/min';
+    return fmt(Math.round(n));
+  }
+
+  function renderMetricTrends(){
+    ensureMetricPanel();const target=document.getElementById('metricTrendGrid');if(!target||!metricPayload)return;
+    const windowData=metricPayload.windows?.[metricWindow]||{},samples=windowData.samples||[],latest=windowData.latest||{};
+    target.innerHTML=metricDefs.map(([label,key,suffix])=>`<div class="mini-card"><strong>${esc(label)}</strong><span>${esc(displayValue(key,latest[key],suffix))} · ${fmt(windowData.points||0)} samples</span><div style="margin-top:8px;color:var(--info)">${sparkline(samples.map(x=>x[key]))}</div></div>`).join('');
+    const note=document.getElementById('metricTrendNote');if(note)note.textContent=`${metricWindow} view · ${metricPayload.retention_days||8} day retention · collector errors ${fmt(metricPayload.collector_errors||0)}`;
+    document.querySelectorAll('[data-metric-window]').forEach(button=>button.classList.toggle('primary',button.dataset.metricWindow===metricWindow));
+  }
+
+  async function loadMetricTrends(){
+    ensureMetricPanel();
+    try{
+      const r=await fetch('/api/metrics/trends',{cache:'no-store'});if(!r.ok)throw new Error('metrics '+r.status);metricPayload=await r.json();renderMetricTrends();
+    }catch(e){const target=document.getElementById('metricTrendGrid');if(target)target.innerHTML='<div class="empty danger">Could not load operational trends.</div>'}
+  }
+
+  document.addEventListener('click',e=>{const button=e.target.closest('[data-metric-window]');if(!button)return;metricWindow=button.dataset.metricWindow||'1h';renderMetricTrends()});
+  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',loadMetricTrends);else loadMetricTrends();
+  setInterval(loadMetricTrends,30000);
+})();

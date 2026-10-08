@@ -28,4 +28,4 @@ RUN mkdir -p /data && chown -R hotpot:hotpot /data /app
 USER 10001:10001
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["python", "-c", "import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:'+os.getenv('HOTPOT_PORT','8080')+'/_hotpot/live', timeout=3).read()"]
-CMD ["python", "-m", "hotpot.server"]
+CMD ["python", "-m", "hotpot.main"]
