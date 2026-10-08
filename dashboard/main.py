@@ -10,6 +10,7 @@ from aiohttp import web
 from . import runtime as core
 from .backups import DashboardBackupManager
 from .enforcement_plan import build_enforcement_plan
+from .manual_response import ManualResponseService
 from .metrics import DashboardMetricsCollector, MetricHistory
 from .policy_runtime import build_app as build_dashboard_app
 from .preflight import run_preflight
@@ -110,6 +111,100 @@ async def api_enforcement_plan(request: web.Request) -> web.Response:
     return web.json_response(plan, headers={"Cache-Control": "no-store"})
 
 
+async def _manual_payload(request: web.Request) -> dict:
+    try:
+        payload = await request.json()
+    except Exception as exc:
+        raise web.HTTPBadRequest(text="JSON body is required") from exc
+    if not isinstance(payload, dict):
+        raise web.HTTPBadRequest(text="JSON body must be an object")
+    return payload
+
+
+async def _ensure_manual_not_suppressed(dashboard, actor_key: str) -> None:
+    policy_manager = getattr(dashboard, "policy_manager", None)
+    if policy_manager is None:
+        return
+    policy = await policy_manager.suppression_for_actor(actor_key)
+    if policy is not None:
+        raise web.HTTPConflict(
+            text=(
+                "manual response is suppressed by policy "
+                f"{policy.get('policy_id')}: {policy.get('reason') or policy.get('kind')}"
+            )
+        )
+
+
+async def api_manual_response_preview(request: web.Request) -> web.Response:
+    dashboard = request.app[core.DASHBOARD_KEY]
+    dashboard.require_auth(request)
+    payload = await _manual_payload(request)
+    actor_key = str(payload.get("actor_key") or "").strip()
+    action = str(payload.get("action") or "").strip()
+    await _ensure_manual_not_suppressed(dashboard, actor_key)
+    async with dashboard.cache_lock:
+        apps = list(dashboard.cache.get("apps", []))
+    service = ManualResponseService(dashboard.store)
+    try:
+        recommendation = await service.prepare(
+            actor_key=actor_key,
+            action_key=action,
+            apps=apps,
+        )
+        plan = build_enforcement_plan(recommendation, dashboard.cloudflare)
+    except ValueError as exc:
+        raise web.HTTPConflict(text=str(exc)) from exc
+    return web.json_response(
+        {"recommendation": recommendation, "plan": plan, "writes": False},
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+async def api_manual_response_apply(request: web.Request) -> web.Response:
+    dashboard = request.app[core.DASHBOARD_KEY]
+    context = dashboard.require_action(request, "manual-response")
+    if not dashboard.cloudflare.configured:
+        raise web.HTTPServiceUnavailable(
+            text="Cloudflare enforcement is disabled or incomplete"
+        )
+    payload = await _manual_payload(request)
+    actor_key = str(payload.get("actor_key") or "").strip()
+    action = str(payload.get("action") or "").strip()
+    await _ensure_manual_not_suppressed(dashboard, actor_key)
+    async with dashboard.cache_lock:
+        apps = list(dashboard.cache.get("apps", []))
+    service = ManualResponseService(dashboard.store)
+    try:
+        recommendation = await service.prepare(
+            actor_key=actor_key,
+            action_key=action,
+            apps=apps,
+        )
+        plan = build_enforcement_plan(recommendation, dashboard.cloudflare)
+        persisted = await service.persist(recommendation, principal=context.username)
+    except ValueError as exc:
+        raise web.HTTPConflict(text=str(exc)) from exc
+
+    result = await dashboard._apply_one(persisted)
+    if result.get("status") == "applied":
+        await dashboard._maybe_reconcile_cloudflare(force=True)
+    await dashboard._record_action(
+        context,
+        event_type="manual_response",
+        message=f"Dashboard user applied manual response {action}",
+        recommendation_id=str(persisted.get("recommendation_id") or "") or None,
+        status=str(result.get("status") or "unknown"),
+        details={"actor_key": actor_key, "action": action, "plan": plan},
+    )
+    await dashboard._refresh_response_cache()
+    status = 200 if result.get("status") == "applied" else 502
+    return web.json_response(
+        {"recommendation": result, "plan": plan},
+        status=status,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 def build_app() -> web.Application:
     app = build_dashboard_app()
     app.on_startup.append(_metrics_startup)
@@ -130,6 +225,10 @@ def build_app() -> web.Application:
     app.router.add_get(
         "/api/v1/recommendations/{recommendation_id}/plan", api_enforcement_plan
     )
+    app.router.add_post("/api/manual-response/preview", api_manual_response_preview)
+    app.router.add_post("/api/v1/manual-response/preview", api_manual_response_preview)
+    app.router.add_post("/api/manual-response/apply", api_manual_response_apply)
+    app.router.add_post("/api/v1/manual-response/apply", api_manual_response_apply)
     return app
 
 
