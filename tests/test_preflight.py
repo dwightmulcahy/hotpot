@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import errno
 import json
+import socket
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from dashboard.preflight import run_preflight as run_dashboard_preflight
+from hotpot.preflight import _bind_available
 from hotpot.preflight import run_preflight as run_hotpot_preflight
 
 
@@ -44,6 +47,28 @@ class PreflightTests(unittest.TestCase):
         self.assertFalse(report["ok"])
         upstream = next(row for row in report["checks"] if row["id"] == "upstream")
         self.assertEqual(upstream["status"], "fail")
+
+    def test_core_bind_probe_reuses_recently_closed_addresses(self) -> None:
+        with patch("hotpot.preflight.socket.socket") as socket_factory:
+            probe = socket_factory.return_value
+            ok, detail = _bind_available("127.0.0.1", 18080)
+        self.assertTrue(ok, detail)
+        probe.setsockopt.assert_called_once_with(
+            socket.SOL_SOCKET, socket.SO_REUSEADDR, 1
+        )
+        probe.bind.assert_called_once_with(("127.0.0.1", 18080))
+        probe.close.assert_called_once()
+
+    def test_core_bind_probe_reports_errno_name_and_message(self) -> None:
+        with patch("hotpot.preflight.socket.socket") as socket_factory:
+            probe = socket_factory.return_value
+            probe.bind.side_effect = OSError(errno.EADDRINUSE, "Address already in use")
+            ok, detail = _bind_available("127.0.0.1", 18080)
+        self.assertFalse(ok)
+        self.assertIn("EADDRINUSE", detail)
+        self.assertIn(f"errno {errno.EADDRINUSE}", detail)
+        self.assertIn("Address already in use", detail)
+        probe.close.assert_called_once()
 
     def test_dashboard_preflight_accepts_coherent_local_configuration(self) -> None:
         with tempfile.TemporaryDirectory() as directory, patch.dict(
