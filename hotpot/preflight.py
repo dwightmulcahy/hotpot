@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import os
 import socket
 import tempfile
@@ -45,9 +46,22 @@ def _bind_available(bind: str, port: int) -> tuple[bool, str]:
     family = socket.AF_INET6 if ":" in bind else socket.AF_INET
     sock = socket.socket(family, socket.SOCK_STREAM)
     try:
+        # Match the practical behavior of the production listener more closely and
+        # avoid false failures while a recently replaced container leaves a socket
+        # in TIME_WAIT. This does not allow two active listeners to share the port.
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind((bind, port))
     except OSError as exc:
-        return False, f"{bind}:{port} cannot be bound: {type(exc).__name__}"
+        error_name = errno.errorcode.get(exc.errno, type(exc).__name__)
+        error_text = exc.strerror or str(exc) or type(exc).__name__
+        if exc.errno is None:
+            detail = f"{bind}:{port} cannot be bound: {error_name}: {error_text}"
+        else:
+            detail = (
+                f"{bind}:{port} cannot be bound: {error_name} "
+                f"(errno {exc.errno}): {error_text}"
+            )
+        return False, detail
     finally:
         sock.close()
     return True, f"{bind}:{port} is available"
@@ -71,35 +85,71 @@ def run_preflight(settings: Settings | None = None, *, check_bind: bool = True) 
         checks,
         "upstream",
         upstream_ok,
-        "Upstream URL has an http/https scheme and hostname" if upstream_ok else "HOTPOT_UPSTREAM must be an http/https URL with a hostname",
+        "Upstream URL has an http/https scheme and hostname"
+        if upstream_ok
+        else "HOTPOT_UPSTREAM must be an http/https URL with a hostname",
     )
 
     port_ok = 1 <= int(resolved.port) <= 65535
-    _check(checks, "port", port_ok, f"Listen port {resolved.port} is valid" if port_ok else "HOTPOT_PORT must be between 1 and 65535")
+    _check(
+        checks,
+        "port",
+        port_ok,
+        f"Listen port {resolved.port} is valid"
+        if port_ok
+        else "HOTPOT_PORT must be between 1 and 65535",
+    )
     if check_bind and port_ok:
         ok, detail = _bind_available(resolved.bind, resolved.port)
         _check(checks, "bind", ok, detail)
 
     try:
         resolved.data_dir.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(prefix=".hotpot-preflight-", dir=resolved.data_dir, delete=True):
+        with tempfile.NamedTemporaryFile(
+            prefix=".hotpot-preflight-", dir=resolved.data_dir, delete=True
+        ):
             pass
         _check(checks, "data-dir", True, "Data directory is writable")
     except Exception as exc:
-        _check(checks, "data-dir", False, f"Data directory is not writable: {type(exc).__name__}: {exc}")
+        _check(
+            checks,
+            "data-dir",
+            False,
+            f"Data directory is not writable: {type(exc).__name__}: {exc}",
+        )
 
     try:
         engine = RuleEngine.load(resolved.profiles_dir, resolved.enabled_profiles)
-        _check(checks, "profiles", bool(engine.rules), f"Loaded {len(engine.rules)} deception rule(s)")
+        _check(
+            checks,
+            "profiles",
+            bool(engine.rules),
+            f"Loaded {len(engine.rules)} deception rule(s)",
+        )
     except Exception as exc:
-        _check(checks, "profiles", False, f"Profiles failed to load: {type(exc).__name__}: {exc}")
+        _check(
+            checks,
+            "profiles",
+            False,
+            f"Profiles failed to load: {type(exc).__name__}: {exc}",
+        )
 
     try:
         Allowlist(resolved.allow_cidrs)
         ClientIPResolver(resolved.client_ip_mode, resolved.trusted_proxy_cidrs)
-        _check(checks, "network-policy", True, "Allowlist and trusted-proxy CIDRs are valid")
+        _check(
+            checks,
+            "network-policy",
+            True,
+            "Allowlist and trusted-proxy CIDRs are valid",
+        )
     except Exception as exc:
-        _check(checks, "network-policy", False, f"Network policy is invalid: {type(exc).__name__}: {exc}")
+        _check(
+            checks,
+            "network-policy",
+            False,
+            f"Network policy is invalid: {type(exc).__name__}: {exc}",
+        )
 
     if resolved.admin_token:
         _check(checks, "admin-token", True, "Admin API token is configured")
@@ -112,14 +162,24 @@ def run_preflight(settings: Settings | None = None, *, check_bind: bool = True) 
             warning=True,
         )
 
-    smtp_values = [resolved.smtp_host, resolved.smtp_from, resolved.smtp_to, resolved.smtp_username, resolved.smtp_password]
+    smtp_values = [
+        resolved.smtp_host,
+        resolved.smtp_from,
+        resolved.smtp_to,
+        resolved.smtp_username,
+        resolved.smtp_password,
+    ]
     smtp_requested = any(bool(value) for value in smtp_values)
-    smtp_ok = not smtp_requested or bool(resolved.smtp_host and resolved.smtp_from and resolved.smtp_to)
+    smtp_ok = not smtp_requested or bool(
+        resolved.smtp_host and resolved.smtp_from and resolved.smtp_to
+    )
     _check(
         checks,
         "smtp",
         smtp_ok,
-        "SMTP notification settings are coherent" if smtp_ok else "SMTP notifications require host, from address and at least one recipient",
+        "SMTP notification settings are coherent"
+        if smtp_ok
+        else "SMTP notifications require host, from address and at least one recipient",
     )
 
     failures = [item for item in checks if item["status"] == "fail"]
