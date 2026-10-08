@@ -20,9 +20,7 @@ def _normalize(value: Any) -> Any:
         return value
 
     actor_key = value.get("actor_key") or value.get("identity_key")
-    observed_ip = value.get("observed_ip") or value.get("client_ip")
-    if observed_ip is None and "ip" in value and not actor_key:
-        observed_ip = value.get("ip")
+    observed_ip = value.get("observed_ip") or value.get("client_ip") or value.get("ip")
 
     normalized: dict[str, Any] = {}
     for key, item in value.items():
@@ -169,12 +167,10 @@ async def _v1_meta(dashboard: Any, request: web.Request) -> web.Response:
 def register_api_routes(app: web.Application, dashboard: Any) -> None:
     """Register campaign investigation plus versioned API compatibility routes."""
 
-    # Campaign detail is useful to the existing dashboard before it migrates to v1.
     app.router.add_get(
         "/api/campaign/{campaign_id}",
         lambda request: _legacy_campaign(dashboard, request),
     )
-
     app.router.add_get(
         "/api/v1/meta",
         lambda request: _v1_meta(dashboard, request),
