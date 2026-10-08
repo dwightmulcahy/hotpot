@@ -11,6 +11,7 @@ from typing import Any
 from aiohttp import web
 
 from . import runtime as core
+from .api_v1 import register_api_routes
 from .notification_routing import NotificationRoutingPolicy, RoutedInvestigationStore
 from .notifications import NotificationCenter, NotificationConfig
 from .production import PRODUCTION_HTML
@@ -55,7 +56,10 @@ def dashboard_page() -> str:
         '<link rel="stylesheet" href="/static/observability.css">\n'
         '<script src="/static/security.js"></script>\n'
     )
-    scripts = '<script src="/static/observability.js"></script>\n'
+    scripts = (
+        '<script src="/static/observability.js"></script>\n'
+        '<script src="/static/campaigns.js"></script>\n'
+    )
     return head + assets + head_marker + body + scripts + body_marker + tail
 
 
@@ -251,7 +255,9 @@ class DashboardApplication(TransactionalProductionDashboard):
                 {"error": "no external notification channels are configured"}, status=409
             )
         if self.client is None:
-            return web.json_response({"error": "dashboard HTTP client is not ready"}, status=503)
+            return web.json_response(
+                {"error": "dashboard HTTP client is not ready"}, status=503
+            )
 
         event_key = f"notification-test:{uuid.uuid4().hex}"
         notification, _ = await self.store.queue_notification(
@@ -445,6 +451,7 @@ def build_app() -> web.Application:
         "/api/enforcement/reconcile", dashboard.api_reconcile_enforcement
     )
     app.router.add_post("/api/system-check", dashboard.api_system_check)
+    register_api_routes(app, dashboard)
     return app
 
 
