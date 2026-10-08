@@ -8,6 +8,7 @@ class DashboardArchitectureTests(unittest.TestCase):
     def test_single_runtime_entrypoint_and_static_enhancements(self) -> None:
         root = Path(__file__).resolve().parents[1]
         server = (root / "dashboard" / "server.py").read_text(encoding="utf-8")
+        main = (root / "dashboard" / "main.py").read_text(encoding="utf-8")
         dockerfile = (root / "Dockerfile.dashboard").read_text(encoding="utf-8")
         security_js = (root / "dashboard" / "static" / "security.js").read_text(
             encoding="utf-8"
@@ -24,7 +25,9 @@ class DashboardArchitectureTests(unittest.TestCase):
         self.assertIn("add_static", server)
         self.assertIn("register_api_routes(app, dashboard)", server)
         self.assertIn("/static/campaigns.js", server)
-        self.assertIn('CMD ["python", "-m", "dashboard.server"]', dockerfile)
+        self.assertIn('CMD ["python", "-m", "dashboard.main"]', dockerfile)
+        self.assertIn("from .server import build_app as build_dashboard_app", main)
+        self.assertNotIn("class Dashboard", main)
         self.assertIn("X-Hotpot-CSRF", security_js)
         self.assertIn("/api/notifications/test", observability_js)
         self.assertIn("Investigation timeline", observability_js)
