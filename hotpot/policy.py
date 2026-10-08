@@ -44,11 +44,15 @@ def _canonical_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def snapshot_revision(instance_id: str, entries: list[dict[str, Any]]) -> str:
+    # The revision is over normalized policy semantics rather than caller formatting.
+    # This prevents equivalent CIDRs such as 192.0.2.7 and 192.0.2.7/32 from
+    # producing different revisions on dashboard and core.
+    normalized = [validate_entry(item) for item in entries]
     canonical = json.dumps(
         {
             "schema_version": POLICY_SCHEMA_VERSION,
             "instance_id": instance_id,
-            "entries": _canonical_entries(entries),
+            "entries": _canonical_entries(normalized),
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -105,7 +109,9 @@ class RuntimePolicyStore:
         data_dir.mkdir(parents=True, exist_ok=True)
         self.path = data_dir / "policy.json"
         self.instance_id = instance_id
-        self.bootstrap_allow_cidrs = tuple(normalize_cidr(value) for value in bootstrap_allow_cidrs)
+        self.bootstrap_allow_cidrs = tuple(
+            normalize_cidr(value) for value in bootstrap_allow_cidrs
+        )
         self.entries: list[dict[str, Any]] = []
         self.revision = snapshot_revision(instance_id, [])
         self.updated_at: str | None = None
@@ -174,7 +180,9 @@ class RuntimePolicyStore:
         current = now or _utcnow()
         return [dict(entry) for entry in self.entries if self._active(entry, current)]
 
-    def allow_match(self, client_ip: str, *, now: datetime | None = None) -> dict[str, Any] | None:
+    def allow_match(
+        self, client_ip: str, *, now: datetime | None = None
+    ) -> dict[str, Any] | None:
         try:
             address = ipaddress.ip_address(client_ip)
         except ValueError:

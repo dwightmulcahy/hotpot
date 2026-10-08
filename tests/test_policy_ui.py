@@ -17,7 +17,9 @@ class PolicyUiTests(unittest.TestCase):
 
         self.assertIn('/static/policy.css', runtime)
         self.assertIn('/static/policy.js', runtime)
-        self.assertNotIn(".replace(", runtime)
+        self.assertNotIn("BASE_DASHBOARD_HTML.replace", runtime)
+        self.assertIn('partition("</head>")', runtime)
+        self.assertIn('rpartition("</body>")', runtime)
         self.assertIn("Policy control plane", script)
         self.assertIn("/api/policies", script)
         self.assertIn("policy-create", script)
