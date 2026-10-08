@@ -12,21 +12,69 @@ from .cloudflare_transactional import (
     TransactionalCloudflareEnforcer,
 )
 from .production import ProductionDashboard
+from .storage_health import DashboardStorageHealth, pre_migration_backup
 
 
 class TransactionalProductionDashboard(ProductionDashboard):
-    """Production dashboard with verified Cloudflare transactions and repair APIs."""
+    """Production dashboard with verified external state and storage protection."""
 
     def __init__(self) -> None:
+        data_dir = Path(os.getenv("HOTPOT_DASHBOARD_DATA_DIR", "/data"))
+        self.pre_migration_backup = pre_migration_backup(data_dir)
         super().__init__()
-        self.cloudflare_cleanup = CloudflareCleanupQueue(
-            Path(os.getenv("HOTPOT_DASHBOARD_DATA_DIR", "/data"))
+        self.cloudflare_cleanup = CloudflareCleanupQueue(data_dir)
+        self.storage_health = DashboardStorageHealth(data_dir)
+
+    async def refresh(self) -> None:
+        await super().refresh()
+        storage = await self.storage_health.maybe_snapshot()
+        async with self.cache_lock:
+            self.cache["storage_health"] = storage
+            self.cache.setdefault("database", {})["storage_health"] = storage
+            if self.pre_migration_backup:
+                self.cache["database"]["pre_migration_backup"] = dict(
+                    self.pre_migration_backup
+                )
+
+    async def _run_system_check(self) -> dict[str, Any]:
+        report = await super()._run_system_check()
+        storage = await self.storage_health.maybe_snapshot(force=True)
+        status_map = {"healthy": "pass", "warning": "warning", "critical": "fail"}
+        report.setdefault("checks", []).append(
+            {
+                "id": "storage-health",
+                "name": "SQLite / disk health",
+                "status": status_map.get(str(storage.get("status")), "fail"),
+                "detail": (
+                    f"quick_check={storage.get('quick_check')}; "
+                    f"free={storage.get('filesystem', {}).get('free_percent', 0)}%; "
+                    f"db={storage.get('database', {}).get('size_bytes', 0)} bytes; "
+                    f"wal={storage.get('database', {}).get('wal_size_bytes', 0)} bytes"
+                ),
+            }
         )
+        checks = report["checks"]
+        failed = sum(1 for item in checks if item.get("status") == "fail")
+        warnings = sum(1 for item in checks if item.get("status") == "warning")
+        passed = sum(1 for item in checks if item.get("status") == "pass")
+        report["summary"] = {
+            "passed": passed,
+            "warnings": warnings,
+            "failed": failed,
+        }
+        report["status"] = "fail" if failed else "warning" if warnings else "pass"
+        report["storage_health"] = storage
+        return report
 
     def _cloudflare_enforcer(self) -> TransactionalCloudflareEnforcer:
         if self.client is None:
             raise RuntimeError("dashboard HTTP client is not ready")
         return TransactionalCloudflareEnforcer(self.cloudflare, self.client)
+
+    @staticmethod
+    def _status_from_storage(storage: dict[str, Any]) -> str:
+        value = str(storage.get("status") or "critical")
+        return "pass" if value == "healthy" else "warning" if value == "warning" else "fail"
 
     async def _record_transaction_audit(
         self,
