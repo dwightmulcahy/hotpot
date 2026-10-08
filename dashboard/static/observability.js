@@ -104,11 +104,35 @@
     }catch(e){alert('Orphan removal failed: '+e.message)}finally{button.disabled=false;button.textContent='Remove orphan'}
   }
 
+  function ensureCampaignPanel(){
+    if(document.getElementById('campaignTable'))return;
+    const view=document.getElementById('view-threats');if(!view)return;
+    const panel=document.createElement('section');panel.className='panel';panel.style.marginTop='12px';
+    panel.innerHTML='<div class="panel-head"><div><div class="section-kicker">Distributed correlation</div><h2>Attack campaigns</h2></div><div id="campaignPolicy" class="meta-line"></div></div><div class="table-wrap"><table><thead><tr><th>Campaign</th><th>Risk</th><th>Actors</th><th>Hits</th><th>Apps</th><th>Scanner / category</th><th>Last seen</th></tr></thead><tbody id="campaignTable"></tbody></table></div><div class="view-note" style="margin-top:8px">Campaigns correlate scanner fingerprints, probe families and timing across distinct actors. ASN, provider and geography are not used and campaign membership does not change an actor score.</div>';
+    view.appendChild(panel);
+  }
+
+  function renderCampaigns(d){
+    ensureCampaignPanel();const target=document.getElementById('campaignTable');if(!target)return;
+    const policy=d.campaign_policy||{},rows=d.campaigns||[];
+    const summary=document.getElementById('campaignPolicy');
+    if(summary)summary.textContent=`${fmt(rows.length)} active · ${fmt(policy.window_minutes||0)}m grouping window · min ${fmt(policy.min_actors||2)} actors`;
+    target.innerHTML=rows.map(c=>{
+      const paths=(c.top_paths||[]).slice(0,2).map(p=>p.path).join(', ');
+      const scanner=(c.scanners||[]).slice(0,2).join(', ')||'pattern match';
+      const category=(c.categories||[]).slice(0,2).join(', ')||'uncategorized';
+      return `<tr><td><strong>${esc(c.label||c.campaign_id)}</strong><div class="cell-sub"><code>${esc(c.campaign_id)}</code>${paths?' · '+esc(paths):''}</div></td><td>${levelBadge(c.max_level||1)}</td><td>${fmt(c.actor_count)}<div class="cell-sub">${fmt(c.source_ip_count)} IPs</div></td><td>${fmt(c.hits)}<div class="cell-sub">${fmt(c.persisted_events)} retained</div></td><td>${fmt(c.app_count)}<div class="cell-sub">${esc((c.apps||[]).slice(0,3).join(', '))}</div></td><td>${esc(scanner)}<div class="cell-sub">${esc(category)}</div></td><td>${esc(shortWhen(c.last_seen))}</td></tr>`;
+    }).join('')||'<tr><td colspan="7" class="empty">No distributed campaigns meet the current correlation threshold.</td></tr>';
+  }
+
   const baseRenderResponses=renderResponses;
   renderResponses=function(d){baseRenderResponses(d);addEnforcementRepairControls(d)};
   document.addEventListener('click',e=>{const repair=e.target.closest('[data-repair-rec]');if(repair){runRepair(repair);return}const orphan=e.target.closest('[data-remove-orphan]');if(orphan)removeOrphan(orphan)});
 
+  const baseRenderThreats=renderThreats;
+  renderThreats=function(d){baseRenderThreats(d);renderCampaigns(d)};
+
   const baseRenderOperations=renderOperations;
   renderOperations=function(d){baseRenderOperations(d);ensureNotificationPanel();loadNotificationCenter(false)};
-  ensureNotificationPanel();loadNotificationCenter(true);setInterval(()=>loadNotificationCenter(false),30000);
+  ensureNotificationPanel();ensureCampaignPanel();loadNotificationCenter(true);setInterval(()=>loadNotificationCenter(false),30000);
 })();

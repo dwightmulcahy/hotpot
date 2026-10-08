@@ -6,6 +6,7 @@ from typing import Any
 
 from aiohttp import web
 
+from .campaigns import CampaignAnalyzer
 from .cloudflare_cleanup import CloudflareCleanupQueue
 from .cloudflare_transactional import (
     CloudflareTransactionError,
@@ -24,10 +25,12 @@ class TransactionalProductionDashboard(ProductionDashboard):
         super().__init__()
         self.cloudflare_cleanup = CloudflareCleanupQueue(data_dir)
         self.storage_health = DashboardStorageHealth(data_dir)
+        self.campaigns = CampaignAnalyzer(data_dir)
 
     async def refresh(self) -> None:
         await super().refresh()
         storage = await self.storage_health.maybe_snapshot()
+        campaigns = await self.campaigns.analyze(limit=20)
         async with self.cache_lock:
             self.cache["storage_health"] = storage
             self.cache.setdefault("database", {})["storage_health"] = storage
@@ -35,6 +38,13 @@ class TransactionalProductionDashboard(ProductionDashboard):
                 self.cache["database"]["pre_migration_backup"] = dict(
                     self.pre_migration_backup
                 )
+            self.cache["campaigns"] = campaigns
+            self.cache["campaign_policy"] = self.campaigns.public_policy()
+            summary = self.cache.setdefault("summary", {})
+            summary["active_campaigns"] = len(campaigns)
+            summary["high_risk_campaigns"] = sum(
+                1 for campaign in campaigns if int(campaign.get("max_level", 1)) >= 4
+            )
 
     async def _run_system_check(self) -> dict[str, Any]:
         report = await super()._run_system_check()
@@ -70,11 +80,6 @@ class TransactionalProductionDashboard(ProductionDashboard):
         if self.client is None:
             raise RuntimeError("dashboard HTTP client is not ready")
         return TransactionalCloudflareEnforcer(self.cloudflare, self.client)
-
-    @staticmethod
-    def _status_from_storage(storage: dict[str, Any]) -> str:
-        value = str(storage.get("status") or "critical")
-        return "pass" if value == "healthy" else "warning" if value == "warning" else "fail"
 
     async def _record_transaction_audit(
         self,
