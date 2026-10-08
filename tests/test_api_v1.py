@@ -50,6 +50,14 @@ class ApiV1Tests(unittest.TestCase):
         self.assertEqual(normalized["nested"]["observed_ip"], "203.0.113.9")
         self.assertNotIn("ip", normalized["nested"])
 
+    def test_actor_with_only_legacy_ip_keeps_it_as_observed_ip(self) -> None:
+        normalized = _normalize(
+            {"identity_key": "198.51.100.7", "ip": "198.51.100.7", "hits": 4}
+        )
+        self.assertEqual(normalized["actor_key"], "198.51.100.7")
+        self.assertEqual(normalized["observed_ip"], "198.51.100.7")
+        self.assertNotIn("ip", normalized)
+
     def test_envelope_declares_schema_version(self) -> None:
         envelope = _envelope(
             "campaign",
