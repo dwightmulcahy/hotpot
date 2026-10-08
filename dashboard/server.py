@@ -13,7 +13,7 @@ from aiohttp import web
 from . import runtime as core
 from .notification_routing import NotificationRoutingPolicy, RoutedInvestigationStore
 from .notifications import NotificationCenter, NotificationConfig
-from .production import PRODUCTION_HTML, ProductionDashboard
+from .production import PRODUCTION_HTML
 from .security import (
     ACTION_HEADER,
     CSRF_HEADER,
@@ -23,6 +23,7 @@ from .security import (
     SessionManager,
     secret_from_env,
 )
+from .transactional_production import TransactionalProductionDashboard
 
 
 _SECRET_NAMES = (
@@ -61,7 +62,7 @@ def dashboard_page() -> str:
 DASHBOARD_HTML = dashboard_page()
 
 
-class DashboardApplication(ProductionDashboard):
+class DashboardApplication(TransactionalProductionDashboard):
     """Single production dashboard application.
 
     Security, investigation timelines, notifications, routing and Cloudflare response
@@ -323,6 +324,30 @@ class DashboardApplication(ProductionDashboard):
         )
         return response
 
+    async def api_repair_enforcement(self, request: web.Request) -> web.Response:
+        context = self.require_action(request, "repair")
+        recommendation_id = request.match_info.get("recommendation_id", "").strip()
+        response = await super().api_repair_enforcement(request)
+        await self._record_action(
+            context,
+            event_type="dashboard_repair",
+            message="Dashboard user requested verified Cloudflare rule repair",
+            recommendation_id=recommendation_id or None,
+            details={"http_status": response.status},
+        )
+        return response
+
+    async def api_remove_orphan(self, request: web.Request) -> web.Response:
+        context = self.require_action(request, "remove-orphan")
+        response = await super().api_remove_orphan(request)
+        await self._record_action(
+            context,
+            event_type="dashboard_remove_orphan",
+            message="Dashboard user requested verified orphan-rule removal",
+            details={"http_status": response.status},
+        )
+        return response
+
     async def api_reconcile_enforcement(self, request: web.Request) -> web.Response:
         context = self.require_action(request, "reconcile")
         response = await super().api_reconcile_enforcement(request)
@@ -395,6 +420,7 @@ def build_app() -> web.Application:
     app.router.add_get("/api/recommendation", dashboard.api_recommendation)
     app.router.add_get("/api/audit", dashboard.api_audit)
     app.router.add_get("/api/notifications", dashboard.api_notifications)
+    app.router.add_get("/api/enforcement/cleanup-jobs", dashboard.api_cleanup_jobs)
     app.router.add_post("/api/notifications/test", dashboard.api_notification_test)
     app.router.add_post(
         "/api/recommendation/{recommendation_id}/dismiss",
@@ -407,6 +433,13 @@ def build_app() -> web.Application:
     app.router.add_post(
         "/api/recommendation/{recommendation_id}/remove",
         dashboard.api_remove_enforcement,
+    )
+    app.router.add_post(
+        "/api/recommendation/{recommendation_id}/repair",
+        dashboard.api_repair_enforcement,
+    )
+    app.router.add_post(
+        "/api/enforcement/orphan/remove", dashboard.api_remove_orphan
     )
     app.router.add_post(
         "/api/enforcement/reconcile", dashboard.api_reconcile_enforcement

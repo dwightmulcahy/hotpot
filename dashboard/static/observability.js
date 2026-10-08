@@ -57,6 +57,57 @@
     }catch(e){target.innerHTML='<div class="empty danger">Could not load notification center.</div>';notificationLoadedAt=0}finally{notificationLoading=false}
   }
 
+  function addEnforcementRepairControls(d){
+    const rr=d.response||{},cf=rr.enforcement||{},active=rr.active_enforcements||[];
+    const cards=[...document.querySelectorAll('#activeEnforcement .enforcement-card')];
+    cards.forEach((card,i)=>{
+      const row=active[i]||{},state=row.reconciliation_status||'unchecked';
+      if(!['drifted','missing','error'].includes(state))return;
+      const actions=card.querySelector('.actions');if(!actions||actions.querySelector('[data-repair-rec]'))return;
+      const button=document.createElement('button');button.className='btn primary';button.type='button';button.dataset.repairRec=row.recommendation_id||'';button.textContent='Repair rule';actions.insertBefore(button,actions.lastElementChild||null);
+    });
+
+    const r=cf.reconciliation||{},orphans=r.orphans||[],jobs=r.rollback_cleanup_jobs||[];
+    const target=document.getElementById('reconciliation');if(!target)return;
+    if(orphans.length){
+      const section=document.createElement('div');section.className='transaction-actions';section.innerHTML='<div class="meta-line warn" style="margin-top:12px"><strong>Orphan cleanup</strong></div>';
+      orphans.forEach(o=>{
+        const row=document.createElement('div');row.className='list-row';row.innerHTML=`<div class="list-main"><div class="list-title">${esc(o.ref||o.rule_id||'Hotpot rule')}</div><div class="list-meta">zone ${esc(String(o.zone_id||'').slice(0,12))} · rule ${esc(String(o.rule_id||'').slice(0,12))}</div></div><button class="btn danger" type="button" data-remove-orphan>Remove orphan</button>`;
+        row.querySelector('[data-remove-orphan]')._hotpotRule=o;section.appendChild(row);
+      });
+      target.appendChild(section);
+    }
+    if(jobs.length){
+      const note=document.createElement('div');note.className='meta-line danger';note.style.marginTop='10px';note.textContent=`${jobs.length} durable rollback cleanup job${jobs.length===1?'':'s'} pending`;target.appendChild(note);
+    }
+  }
+
+  async function runRepair(button){
+    const id=button.dataset.repairRec;if(!id)return;
+    if(!confirm('Repair this Cloudflare enforcement rule to match the approved Hotpot recommendation?'))return;
+    button.disabled=true;button.textContent='Repairing…';
+    try{
+      const r=await fetch('/api/recommendation/'+encodeURIComponent(id)+'/repair',{method:'POST',headers:{'X-Hotpot-Action':'repair'}});let body={};try{body=await r.json()}catch(e){}
+      if(!r.ok)throw new Error(body.error||body.message||('HTTP '+r.status));
+      await load();
+    }catch(e){alert('Cloudflare repair failed: '+e.message)}finally{button.disabled=false;button.textContent='Repair rule'}
+  }
+
+  async function removeOrphan(button){
+    const rule=button._hotpotRule||{};
+    if(!confirm('Remove this orphaned Hotpot Cloudflare rule? This only removes the selected rule.'))return;
+    button.disabled=true;button.textContent='Removing…';
+    try{
+      const r=await fetch('/api/enforcement/orphan/remove',{method:'POST',headers:{'Content-Type':'application/json','X-Hotpot-Action':'remove-orphan'},body:JSON.stringify(rule)});let body={};try{body=await r.json()}catch(e){}
+      if(!r.ok)throw new Error(body.error||body.message||('HTTP '+r.status));
+      await load();
+    }catch(e){alert('Orphan removal failed: '+e.message)}finally{button.disabled=false;button.textContent='Remove orphan'}
+  }
+
+  const baseRenderResponses=renderResponses;
+  renderResponses=function(d){baseRenderResponses(d);addEnforcementRepairControls(d)};
+  document.addEventListener('click',e=>{const repair=e.target.closest('[data-repair-rec]');if(repair){runRepair(repair);return}const orphan=e.target.closest('[data-remove-orphan]');if(orphan)removeOrphan(orphan)});
+
   const baseRenderOperations=renderOperations;
   renderOperations=function(d){baseRenderOperations(d);ensureNotificationPanel();loadNotificationCenter(false)};
   ensureNotificationPanel();loadNotificationCenter(true);setInterval(()=>loadNotificationCenter(false),30000);
