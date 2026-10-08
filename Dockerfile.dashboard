@@ -1,11 +1,18 @@
-FROM python:3.12-alpine
+FROM python:3.12.15-alpine3.24@sha256:7a63cb93468d7ce5f24b1332a8f7a27f444b3221b0a3d6b5573036b78d937c78
 
 ARG HOTPOT_VERSION=dev
 ARG HOTPOT_GIT_SHA=unknown
 ARG HOTPOT_BUILD_DATE=unknown
 
+LABEL org.opencontainers.image.source="https://github.com/dwightmulcahy/hotpot" \
+      org.opencontainers.image.title="Hotpot Dashboard" \
+      org.opencontainers.image.version="${HOTPOT_VERSION}" \
+      org.opencontainers.image.revision="${HOTPOT_GIT_SHA}" \
+      org.opencontainers.image.created="${HOTPOT_BUILD_DATE}"
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
     HOTPOT_VERSION=${HOTPOT_VERSION} \
     HOTPOT_GIT_SHA=${HOTPOT_GIT_SHA} \
     HOTPOT_BUILD_DATE=${HOTPOT_BUILD_DATE}
@@ -19,4 +26,5 @@ COPY dashboard ./dashboard
 RUN mkdir -p /data && chown -R hotpot:hotpot /data /app
 USER 10001:10001
 EXPOSE 19090
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["python", "-c", "import os,socket; s=socket.create_connection(('127.0.0.1',int(os.getenv('HOTPOT_DASHBOARD_PORT','19090'))),3); s.close()"]
 CMD ["python", "-m", "dashboard.server"]
