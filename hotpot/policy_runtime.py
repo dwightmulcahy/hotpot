@@ -6,6 +6,7 @@ from aiohttp import web
 
 from .app import HOTPOT_APP_KEY
 from .config import Settings
+from .deployment import deployment_snapshot
 from .policy import RuntimePolicyStore
 from .server import HotpotServer
 
@@ -64,6 +65,19 @@ class PolicyHotpotServer(HotpotServer):
             entry["value"]
             for entry in self.policy.active_entries()
             if entry.get("kind") == "allow_cidr"
+        ]
+        deployment = deployment_snapshot(
+            self.settings,
+            version=self.version,
+            git_sha=self.git_sha,
+            build_date=self.build_date,
+        )
+        deployment["policy_revision"] = self.policy.revision
+        deployment["policy_updated_at"] = self.policy.updated_at
+        payload["deployment"] = deployment
+        payload["config_fingerprint"] = deployment["config_fingerprint"]
+        payload["shared_config_fingerprint"] = deployment[
+            "shared_config_fingerprint"
         ]
         return web.json_response(payload, headers={"Cache-Control": "no-store"})
 
