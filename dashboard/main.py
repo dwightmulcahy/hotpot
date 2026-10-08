@@ -9,6 +9,7 @@ from aiohttp import web
 
 from . import runtime as core
 from .backups import DashboardBackupManager
+from .enforcement_plan import build_enforcement_plan
 from .metrics import DashboardMetricsCollector, MetricHistory
 from .preflight import run_preflight
 from .server import build_app as build_dashboard_app
@@ -93,6 +94,22 @@ async def api_backup_run(request: web.Request) -> web.Response:
     return web.json_response(result, headers={"Cache-Control": "no-store"})
 
 
+async def api_enforcement_plan(request: web.Request) -> web.Response:
+    dashboard = request.app[core.DASHBOARD_KEY]
+    dashboard.require_auth(request)
+    recommendation_id = request.match_info.get("recommendation_id", "").strip()
+    if not recommendation_id:
+        raise web.HTTPBadRequest(text="recommendation id is required")
+    recommendation = await dashboard.store.recommendation(recommendation_id)
+    if recommendation is None:
+        raise web.HTTPNotFound(text="recommendation not found")
+    try:
+        plan = build_enforcement_plan(recommendation, dashboard.cloudflare)
+    except ValueError as exc:
+        raise web.HTTPConflict(text=str(exc)) from exc
+    return web.json_response(plan, headers={"Cache-Control": "no-store"})
+
+
 def build_app() -> web.Application:
     app = build_dashboard_app()
     app.on_startup.append(_metrics_startup)
@@ -107,6 +124,12 @@ def build_app() -> web.Application:
     app.router.add_get("/api/v1/backups", api_backups)
     app.router.add_post("/api/backups/run", api_backup_run)
     app.router.add_post("/api/v1/backups/run", api_backup_run)
+    app.router.add_get(
+        "/api/recommendation/{recommendation_id}/plan", api_enforcement_plan
+    )
+    app.router.add_get(
+        "/api/v1/recommendations/{recommendation_id}/plan", api_enforcement_plan
+    )
     return app
 
 
