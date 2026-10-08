@@ -9,6 +9,9 @@ class DashboardArchitectureTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         server = (root / "dashboard" / "server.py").read_text(encoding="utf-8")
         main = (root / "dashboard" / "main.py").read_text(encoding="utf-8")
+        policy_runtime = (root / "dashboard" / "policy_runtime.py").read_text(
+            encoding="utf-8"
+        )
         dockerfile = (root / "Dockerfile.dashboard").read_text(encoding="utf-8")
         security_js = (root / "dashboard" / "static" / "security.js").read_text(
             encoding="utf-8"
@@ -26,7 +29,8 @@ class DashboardArchitectureTests(unittest.TestCase):
         self.assertIn("register_api_routes(app, dashboard)", server)
         self.assertIn("/static/campaigns.js", server)
         self.assertIn('CMD ["python", "-m", "dashboard.main"]', dockerfile)
-        self.assertIn("from .server import build_app as build_dashboard_app", main)
+        self.assertIn("from .policy_runtime import build_app as build_dashboard_app", main)
+        self.assertIn("class PolicyDashboardApplication(DashboardApplication)", policy_runtime)
         self.assertNotIn("class Dashboard", main)
         self.assertIn("X-Hotpot-CSRF", security_js)
         self.assertIn("/api/notifications/test", observability_js)
