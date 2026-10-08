@@ -160,6 +160,7 @@ async def _v1_meta(dashboard: Any, request: web.Request) -> web.Response:
                     "New integrations should prefer /api/v1/*."
                 ),
             },
+            "session_bootstrap": "/api/session",
             "campaign_enforcement": "observational-only",
         },
     )
@@ -191,8 +192,10 @@ def register_api_routes(app: web.Application, dashboard: Any) -> None:
         lambda request: _v1_attacker(dashboard, request),
     )
 
+    # Authentication/session bootstrap intentionally stays on /api/session. Wrapping
+    # it would discard the Set-Cookie side effect. Versioning applies to data/action
+    # resources while preserving the existing secure browser session contract.
     read_routes = (
-        ("/api/v1/session", "session", dashboard.api_session),
         ("/api/v1/overview", "overview", dashboard.api_overview),
         ("/api/v1/network", "network", dashboard.api_network),
         (
