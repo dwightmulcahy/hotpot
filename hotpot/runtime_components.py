@@ -7,6 +7,7 @@ from typing import Any
 
 from .durable_store import SourceIdentityStore
 from .logging import EventLogger
+from .notification_digest import NotificationDigestStore
 from .store import AttackerState
 
 
@@ -37,10 +38,15 @@ class ResilientSourceStore:
         self.inner: SourceIdentityStore | None = None
         self.path: Path | None = None
         self.source_id: str | None = None
+        self.notification_digest: NotificationDigestStore | None = None
         try:
             self.inner = SourceIdentityStore(data_dir)
             self.path = self.inner.path
             self.source_id = self.inner.source_id
+        except Exception:
+            pass
+        try:
+            self.notification_digest = NotificationDigestStore(data_dir)
         except Exception:
             pass
 
@@ -62,7 +68,13 @@ class ResilientSourceStore:
     ) -> bool:
         if self.inner is None:
             return False
-        return await self.inner.claim_notification(actor_key, level, cooldown_seconds)
+        claimed = await self.inner.claim_notification(actor_key, level, cooldown_seconds)
+        if not claimed and self.notification_digest is not None:
+            try:
+                await self.notification_digest.record(actor_key, level)
+            except Exception:
+                pass
+        return claimed
 
     async def cleanup(
         self, retention_days: int, attacker_retention_days: int

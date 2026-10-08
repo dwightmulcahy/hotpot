@@ -8,19 +8,23 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from .notification_digest import NotificationDigestStore
+
 
 class NotificationSpool:
     """Durable fallback queue for security notifications.
 
     The main telemetry queue is intentionally memory-bounded. If it cannot accept a
     notification, or an external delivery fails after a cooldown claim, this spool
-    preserves the event on disk for a later retry.
+    preserves the event on disk for a later retry. Cooldown-suppressed activity is
+    surfaced through the same retry path as a durable digest job.
     """
 
     def __init__(self, data_dir: Path, *, retry_seconds: int = 60) -> None:
         data_dir.mkdir(parents=True, exist_ok=True)
         self.path = data_dir / "notification-spool.sqlite3"
         self.retry_seconds = max(10, int(retry_seconds))
+        self.digest = NotificationDigestStore(data_dir)
         self._initialize()
 
     def _connection(self) -> sqlite3.Connection:
@@ -99,7 +103,12 @@ class NotificationSpool:
             return int(cursor.lastrowid)
 
     async def due(self, limit: int = 25) -> list[dict[str, Any]]:
-        return await asyncio.to_thread(self._due_sync, limit)
+        limit = max(1, min(100, int(limit)))
+        spool = await asyncio.to_thread(self._due_sync, limit)
+        remaining = max(0, limit - len(spool))
+        if remaining:
+            spool.extend(await self.digest.due(remaining))
+        return spool
 
     def _due_sync(self, limit: int) -> list[dict[str, Any]]:
         now = datetime.now(timezone.utc).isoformat()
@@ -121,10 +130,13 @@ class NotificationSpool:
                 item["event"] = {}
                 item.pop("event_json", None)
             item["claimed"] = bool(item.get("claimed"))
+            item["job_source"] = "spool"
             result.append(item)
         return result
 
     async def mark_claimed(self, job_id: int) -> None:
+        if int(job_id) < 0:
+            return
         await asyncio.to_thread(self._mark_claimed_sync, job_id)
 
     def _mark_claimed_sync(self, job_id: int) -> None:
@@ -136,6 +148,9 @@ class NotificationSpool:
             )
 
     async def mark_done(self, job_id: int, *, status: str = "sent") -> None:
+        if int(job_id) < 0:
+            await self.digest.mark_done(abs(int(job_id)), status=status)
+            return
         await asyncio.to_thread(self._mark_done_sync, job_id, status)
 
     def _mark_done_sync(self, job_id: int, status: str) -> None:
@@ -151,6 +166,9 @@ class NotificationSpool:
             )
 
     async def mark_error(self, job_id: int, error: str) -> None:
+        if int(job_id) < 0:
+            await self.digest.mark_error(abs(int(job_id)), error)
+            return
         await asyncio.to_thread(self._mark_error_sync, job_id, error)
 
     def _mark_error_sync(self, job_id: int, error: str) -> None:
@@ -178,7 +196,13 @@ class NotificationSpool:
             )
 
     async def snapshot(self) -> dict[str, Any]:
-        return await asyncio.to_thread(self._snapshot_sync)
+        snapshot = await asyncio.to_thread(self._snapshot_sync)
+        digest_pending = await self.digest.pending_count()
+        snapshot["spool_pending"] = snapshot["pending"]
+        snapshot["digest_pending"] = digest_pending
+        snapshot["pending"] = int(snapshot["pending"]) + digest_pending
+        snapshot["digest_window_seconds"] = self.digest.window_seconds
+        return snapshot
 
     def _snapshot_sync(self) -> dict[str, Any]:
         with self._connection() as conn:

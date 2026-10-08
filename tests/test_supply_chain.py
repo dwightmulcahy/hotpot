@@ -51,6 +51,21 @@ class SupplyChainTests(unittest.TestCase):
         self.assertIn("version-update:semver-minor", config)
         self.assertIn("version-update:semver-major", config)
 
+    def test_release_images_publish_sbom_provenance_and_github_attestations(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        workflow = (root / ".github" / "workflows" / "docker-publish.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertGreaterEqual(workflow.count("sbom: true"), 2)
+        self.assertGreaterEqual(workflow.count("provenance: mode=max"), 2)
+        self.assertEqual(workflow.count("actions/attest-build-provenance@v3"), 2)
+        self.assertIn("id-token: write", workflow)
+        self.assertIn("attestations: write", workflow)
+        self.assertIn("id: hotpot-build", workflow)
+        self.assertIn("id: dashboard-build", workflow)
+        self.assertIn("steps.hotpot-build.outputs.digest", workflow)
+        self.assertIn("steps.dashboard-build.outputs.digest", workflow)
+
 
 if __name__ == "__main__":
     unittest.main()
