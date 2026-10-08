@@ -126,7 +126,7 @@ class Notifier:
         }.get(level_number, "#475569")
 
         def esc(value: Any) -> str:
-            return html.escape(str(value), quote=True)
+            return html.escape(str(value), quote=False)
 
         def row(label: str, value: Any) -> str:
             return (
