@@ -15,14 +15,22 @@ class DashboardArchitectureTests(unittest.TestCase):
         observability_js = (
             root / "dashboard" / "static" / "observability.js"
         ).read_text(encoding="utf-8")
+        campaigns_js = (
+            root / "dashboard" / "static" / "campaigns.js"
+        ).read_text(encoding="utf-8")
         self.assertIn("class DashboardApplication(TransactionalProductionDashboard)", server)
         self.assertNotIn(".replace(", server)
         self.assertIn("partition(\"</head>\")", server)
         self.assertIn("add_static", server)
+        self.assertIn("register_api_routes(app, dashboard)", server)
+        self.assertIn("/static/campaigns.js", server)
         self.assertIn('CMD ["python", "-m", "dashboard.server"]', dockerfile)
         self.assertIn("X-Hotpot-CSRF", security_js)
         self.assertIn("/api/notifications/test", observability_js)
         self.assertIn("Investigation timeline", observability_js)
+        self.assertIn("/api/campaign/", campaigns_js)
+        self.assertIn("data-campaign-actor", campaigns_js)
+        self.assertIn("Observational only", campaigns_js)
 
     def test_old_entrypoints_are_compatibility_shims_not_layers(self) -> None:
         root = Path(__file__).resolve().parents[1] / "dashboard"

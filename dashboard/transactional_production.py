@@ -6,6 +6,7 @@ from typing import Any
 
 from aiohttp import web
 
+from .campaign_alerts import process_campaign_notifications
 from .campaigns import CampaignAnalyzer
 from .cloudflare_cleanup import CloudflareCleanupQueue
 from .cloudflare_transactional import (
@@ -45,6 +46,17 @@ class TransactionalProductionDashboard(ProductionDashboard):
             summary["high_risk_campaigns"] = sum(
                 1 for campaign in campaigns if int(campaign.get("max_level", 1)) >= 4
             )
+
+        # DashboardApplication supplies the routed notification center. Keep this
+        # superclass independently usable by tests and legacy callers that do not.
+        if getattr(self, "notifications", None) is not None:
+            try:
+                result = await process_campaign_notifications(self, campaigns)
+                async with self.cache_lock:
+                    self.cache["campaign_notifications"] = result
+            except Exception:
+                if hasattr(self, "notification_processing_errors"):
+                    self.notification_processing_errors += 1
 
     async def _run_system_check(self) -> dict[str, Any]:
         report = await super()._run_system_check()
