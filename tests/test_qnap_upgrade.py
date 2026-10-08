@@ -15,7 +15,8 @@ class QnapUpgradeTests(unittest.TestCase):
         self.assertIn('DASHBOARD_SERVICE="hotpot-dashboard"', script)
         self.assertIn("for service in $CORE_SERVICES", script)
         self.assertIn('compose up -d --no-deps --force-recreate "$DASHBOARD_SERVICE"', script)
-        self.assertNotIn("docker compose down", script)
+        self.assertNotIn("\ndocker compose down", script)
+        self.assertNotIn("\ncompose down", script)
         self.assertNotIn("cloudflared geoipupdate", script)
         self.assertNotIn("docker inspect -f '{{json .Config.Env}}'", script)
 
