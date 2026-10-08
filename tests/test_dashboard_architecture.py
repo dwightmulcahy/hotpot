@@ -15,7 +15,7 @@ class DashboardArchitectureTests(unittest.TestCase):
         observability_js = (
             root / "dashboard" / "static" / "observability.js"
         ).read_text(encoding="utf-8")
-        self.assertIn("class DashboardApplication(ProductionDashboard)", server)
+        self.assertIn("class DashboardApplication(TransactionalProductionDashboard)", server)
         self.assertNotIn(".replace(", server)
         self.assertIn("partition(\"</head>\")", server)
         self.assertIn("add_static", server)
