@@ -11,8 +11,8 @@ from . import runtime as core
 from .backups import DashboardBackupManager
 from .enforcement_plan import build_enforcement_plan
 from .metrics import DashboardMetricsCollector, MetricHistory
+from .policy_runtime import build_app as build_dashboard_app
 from .preflight import run_preflight
-from .server import build_app as build_dashboard_app
 
 
 METRICS_KEY = web.AppKey("dashboard_metrics", DashboardMetricsCollector)
