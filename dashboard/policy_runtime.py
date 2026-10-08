@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +10,34 @@ from aiohttp import web
 from . import runtime as core
 from .api_v1 import register_api_routes
 from .policy import PolicyManager
-from .server import DashboardApplication, STATIC_DIR
+from .server import (
+    DASHBOARD_HTML as BASE_DASHBOARD_HTML,
+    DashboardApplication,
+    STATIC_DIR,
+)
+
+
+def policy_dashboard_page() -> str:
+    """Attach policy assets to the already composed production dashboard page."""
+
+    head, head_marker, remainder = BASE_DASHBOARD_HTML.partition("</head>")
+    if not head_marker:
+        raise RuntimeError("dashboard template is missing </head>")
+    body, body_marker, tail = remainder.rpartition("</body>")
+    if not body_marker:
+        raise RuntimeError("dashboard template is missing </body>")
+    return (
+        head
+        + '<link rel="stylesheet" href="/static/policy.css">\n'
+        + head_marker
+        + body
+        + '<script src="/static/policy.js"></script>\n'
+        + body_marker
+        + tail
+    )
+
+
+POLICY_DASHBOARD_HTML = policy_dashboard_page()
 
 
 class PolicyDashboardApplication(DashboardApplication):
@@ -38,8 +65,8 @@ class PolicyDashboardApplication(DashboardApplication):
                     self.client, token=self.hotpot_token, force=False
                 )
             except Exception:
-                # The last-known-good snapshot remains active at each Hotpot. Policy
-                # sync health is surfaced separately and must not take the dashboard down.
+                # Each core keeps its last-known-good snapshot when central sync is
+                # unavailable; policy drift is visible without taking down dashboard.
                 pass
         await super().refresh()
 
@@ -98,7 +125,8 @@ class PolicyDashboardApplication(DashboardApplication):
                 raise web.HTTPConflict(
                     text=(
                         "response approval is suppressed by policy "
-                        f"{policy.get('policy_id')}: {policy.get('reason') or policy.get('kind')}"
+                        f"{policy.get('policy_id')}: "
+                        f"{policy.get('reason') or policy.get('kind')}"
                     )
                 )
         return await super().api_approve_recommendation(request)
@@ -110,20 +138,26 @@ class PolicyDashboardApplication(DashboardApplication):
         except ValueError as exc:
             raise web.HTTPBadRequest(text="audit_limit must be an integer") from exc
         policies = await self.policy_manager.list(include_inactive=True)
+        now = datetime.now(timezone.utc)
+        active = 0
+        for item in policies:
+            expires_at = item.get("expires_at")
+            try:
+                expires = (
+                    datetime.fromisoformat(str(expires_at).replace("Z", "+00:00"))
+                    if expires_at
+                    else None
+                )
+            except ValueError:
+                expires = now
+            if expires is not None and expires.tzinfo is None:
+                expires = expires.replace(tzinfo=timezone.utc)
+            if item.get("enabled") and (expires is None or expires > now):
+                active += 1
         return web.json_response(
             {
                 "policies": policies,
-                "active": sum(
-                    1
-                    for item in policies
-                    if item.get("enabled")
-                    and (
-                        not item.get("expires_at")
-                        or str(item.get("expires_at")) > __import__("datetime").datetime.now(
-                            __import__("datetime").timezone.utc
-                        ).isoformat()
-                    )
-                ),
+                "active": active,
                 "sync": await self.policy_manager.sync_status(),
                 "audit": await self.policy_manager.audit(limit),
                 "kinds": [
@@ -208,10 +242,61 @@ class PolicyDashboardApplication(DashboardApplication):
         self.require_auth(request)
         try:
             payload = await request.json()
-            result = await self.policy_manager.preview(payload)
+            if isinstance(payload, dict) and "candidate" in payload:
+                candidate = self.policy_manager.validate_policy(payload["candidate"])
+                scoped = candidate.get("app_ids") or [
+                    instance.instance_id for instance in self.instances
+                ]
+                app_names = [
+                    instance.name
+                    for instance in self.instances
+                    if instance.instance_id in scoped
+                ]
+                if candidate["kind"] == "allow_cidr":
+                    impacts = [
+                        "bypass_deception",
+                        "exclude_from_response_enforcement",
+                    ]
+                else:
+                    impacts = [
+                        "suppress_notifications",
+                        "suppress_response_approval",
+                    ]
+                result = {
+                    "candidate": candidate,
+                    "applications": app_names,
+                    "impacts": impacts,
+                    "writes": False,
+                    "note": "Preview only. No policy has been persisted or synchronized.",
+                }
+            else:
+                result = await self.policy_manager.preview(payload)
         except ValueError as exc:
             raise web.HTTPBadRequest(text=str(exc)) from exc
         return web.json_response(result, headers={"Cache-Control": "no-store"})
+
+    async def index(self, request: web.Request) -> web.Response:
+        context = self.auth_context(request)
+        if context is None:
+            raise web.HTTPUnauthorized(
+                headers={"WWW-Authenticate": 'Basic realm="Hotpot Dashboard"'}
+            )
+        token, _, _ = self.sessions.issue(context.username)
+        response = web.Response(
+            text=POLICY_DASHBOARD_HTML,
+            content_type="text/html",
+            charset="utf-8",
+            headers={
+                "Cache-Control": "no-store",
+                "X-Robots-Tag": "noindex, nofollow",
+                "Content-Security-Policy": "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'",
+                "X-Frame-Options": "DENY",
+                "X-Content-Type-Options": "nosniff",
+                "Referrer-Policy": "no-referrer",
+            },
+        )
+        self.sessions.set_cookie(response, token)
+        return response
 
 
 def build_app() -> web.Application:
