@@ -60,10 +60,17 @@ class _Campaign:
     scanners: set[str] = field(default_factory=set)
     fingerprints: set[str] = field(default_factory=set)
     paths: dict[str, int] = field(default_factory=dict)
+    events: list[dict[str, Any]] = field(default_factory=list)
+    actor_stats: dict[str, dict[str, Any]] = field(default_factory=dict)
     hits: int = 0
     persisted_events: int = 0
     max_level: int = 1
     max_severity: int = 1
+
+    @property
+    def campaign_id(self) -> str:
+        seed = f"{self.signature}|{self.first_seen.isoformat()}"
+        return "campaign_" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16]
 
     def add(self, event: dict[str, Any], ts: datetime) -> None:
         self.first_seen = min(self.first_seen, ts)
@@ -74,9 +81,12 @@ class _Campaign:
         ip = str(event.get("client_ip") or "").strip()
         if ip:
             self.source_ips.add(ip)
-        app = str(event.get("instance_name") or event.get("instance_id") or "").strip()
-        if app:
-            self.apps.add(app)
+        instance_id = str(event.get("instance_id") or "").strip()
+        instance_name = str(
+            event.get("instance_name") or event.get("instance_id") or ""
+        ).strip()
+        if instance_name:
+            self.apps.add(instance_name)
         category = str(event.get("category") or "").strip()
         if category:
             self.categories.add(category)
@@ -91,23 +101,80 @@ class _Campaign:
         path = str(event.get("path") or "").strip()
         if path:
             self.paths[path] = self.paths.get(path, 0) + 1
+
+        suppressed = max(0, int(event.get("suppressed_before", 0) or 0))
+        event_hits = 1 + suppressed
+        level = int(event.get("escalation_level", 1) or 1)
+        severity = int(event.get("severity", 1) or 1)
         self.persisted_events += 1
-        self.hits += 1 + max(0, int(event.get("suppressed_before", 0) or 0))
-        self.max_level = max(
-            self.max_level, int(event.get("escalation_level", 1) or 1)
-        )
-        self.max_severity = max(
-            self.max_severity, int(event.get("severity", 1) or 1)
+        self.hits += event_hits
+        self.max_level = max(self.max_level, level)
+        self.max_severity = max(self.max_severity, severity)
+
+        if actor:
+            stats = self.actor_stats.setdefault(
+                actor,
+                {
+                    "actor_key": actor,
+                    "observed_ips": set(),
+                    "apps": set(),
+                    "hits": 0,
+                    "persisted_events": 0,
+                    "first_seen": ts,
+                    "last_seen": ts,
+                    "max_level": 1,
+                    "max_severity": 1,
+                },
+            )
+            if ip:
+                stats["observed_ips"].add(ip)
+            if instance_name:
+                stats["apps"].add(instance_name)
+            stats["hits"] += event_hits
+            stats["persisted_events"] += 1
+            stats["first_seen"] = min(stats["first_seen"], ts)
+            stats["last_seen"] = max(stats["last_seen"], ts)
+            stats["max_level"] = max(stats["max_level"], level)
+            stats["max_severity"] = max(stats["max_severity"], severity)
+
+        self.events.append(
+            {
+                "ts": ts.isoformat(),
+                "instance_id": instance_id or None,
+                "instance_name": instance_name or None,
+                "actor_key": actor or None,
+                "observed_ip": ip or None,
+                "method": str(event.get("method") or ""),
+                "path": path,
+                "category": category or None,
+                "action": str(event.get("action") or "") or None,
+                "scanner": str(event.get("scanner") or "") or None,
+                "scanner_family": scanner or None,
+                "fingerprint": fingerprint or None,
+                "severity": severity,
+                "escalation_level": level,
+                "attacker_score": int(event.get("attacker_score", 0) or 0),
+                "suppressed_before": suppressed,
+                "hits": event_hits,
+            }
         )
 
+    def notification_severity(self) -> str | None:
+        actor_count = len(self.actors)
+        if self.max_level >= 4:
+            return "critical"
+        if self.max_level >= 3 and (actor_count >= 3 or self.hits >= 10):
+            return "warning"
+        if actor_count >= 5 and self.hits >= 20:
+            return "warning"
+        return None
+
     def as_dict(self) -> dict[str, Any]:
-        seed = f"{self.signature}|{self.first_seen.isoformat()}"
-        campaign_id = "campaign_" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16]
         top_paths = sorted(
             self.paths.items(), key=lambda item: (-item[1], item[0])
         )[:8]
         return {
-            "campaign_id": campaign_id,
+            "campaign_id": self.campaign_id,
             "label": self.label,
             "signature": self.signature,
             "first_seen": self.first_seen.isoformat(),
@@ -131,9 +198,66 @@ class _Campaign:
             "top_paths": [
                 {"path": path, "hits": hits} for path, hits in top_paths
             ],
+            "notification_severity": self.notification_severity(),
             "scoring_effect": "none",
             "network_geography_used": False,
         }
+
+    def detail(self, timeline_limit: int = 200) -> dict[str, Any]:
+        result = self.as_dict()
+        actor_rows: list[dict[str, Any]] = []
+        for actor, stats in self.actor_stats.items():
+            actor_rows.append(
+                {
+                    "actor_key": actor,
+                    "observed_ips": sorted(stats["observed_ips"]),
+                    "apps": sorted(stats["apps"]),
+                    "hits": int(stats["hits"]),
+                    "persisted_events": int(stats["persisted_events"]),
+                    "first_seen": stats["first_seen"].isoformat(),
+                    "last_seen": stats["last_seen"].isoformat(),
+                    "max_level": int(stats["max_level"]),
+                    "max_severity": int(stats["max_severity"]),
+                }
+            )
+        actor_rows.sort(
+            key=lambda row: (
+                int(row["max_level"]),
+                int(row["hits"]),
+                str(row["last_seen"]),
+                str(row["actor_key"]),
+            ),
+            reverse=True,
+        )
+
+        timeline = sorted(
+            self.events,
+            key=lambda row: (
+                str(row.get("ts") or ""),
+                str(row.get("instance_id") or ""),
+                str(row.get("actor_key") or ""),
+                str(row.get("path") or ""),
+            ),
+        )
+        cap = max(1, min(1000, int(timeline_limit)))
+        result.update(
+            {
+                "actors_detail": actor_rows[:250],
+                "actors_detail_truncated": len(actor_rows) > 250,
+                "timeline": timeline[-cap:],
+                "timeline_truncated": len(timeline) > cap,
+                "timeline_retained_events": len(timeline),
+                "investigation": {
+                    "enforcement_effect": "none",
+                    "automatic_blocking": False,
+                    "note": (
+                        "Campaign correlation is observational. Actor scoring and "
+                        "Cloudflare enforcement remain actor-level decisions."
+                    ),
+                },
+            }
+        )
+        return result
 
 
 class CampaignAnalyzer:
@@ -179,7 +303,14 @@ class CampaignAnalyzer:
     async def analyze(self, limit: int = 20) -> list[dict[str, Any]]:
         return await asyncio.to_thread(self._analyze_sync, limit)
 
-    def _analyze_sync(self, limit: int) -> list[dict[str, Any]]:
+    async def campaign(
+        self, campaign_id: str, *, timeline_limit: int = 200
+    ) -> dict[str, Any] | None:
+        return await asyncio.to_thread(
+            self._campaign_sync, campaign_id, timeline_limit
+        )
+
+    def _load_campaigns_sync(self) -> list[_Campaign]:
         if not self.path.is_file():
             return []
         cutoff = datetime.now(timezone.utc) - timedelta(hours=self.lookback_hours)
@@ -227,7 +358,7 @@ class CampaignAnalyzer:
             current.add(event, ts)
 
         campaigns = [
-            campaign.as_dict()
+            campaign
             for buckets in groups.values()
             for campaign in buckets
             if len(campaign.actors) >= self.min_actors
@@ -235,14 +366,32 @@ class CampaignAnalyzer:
         ]
         campaigns.sort(
             key=lambda item: (
-                int(item["max_level"]),
-                int(item["hits"]),
-                int(item["actor_count"]),
-                str(item["last_seen"]),
+                item.max_level,
+                item.hits,
+                len(item.actors),
+                item.last_seen,
             ),
             reverse=True,
         )
-        return campaigns[: max(1, min(100, int(limit)))]
+        return campaigns
+
+    def _analyze_sync(self, limit: int) -> list[dict[str, Any]]:
+        campaigns = self._load_campaigns_sync()
+        return [
+            campaign.as_dict()
+            for campaign in campaigns[: max(1, min(100, int(limit)))]
+        ]
+
+    def _campaign_sync(
+        self, campaign_id: str, timeline_limit: int
+    ) -> dict[str, Any] | None:
+        wanted = str(campaign_id or "").strip()
+        if not wanted:
+            return None
+        for campaign in self._load_campaigns_sync():
+            if campaign.campaign_id == wanted:
+                return campaign.detail(timeline_limit)
+        return None
 
     def public_policy(self) -> dict[str, Any]:
         return {
@@ -251,6 +400,10 @@ class CampaignAnalyzer:
             "min_actors": self.min_actors,
             "min_hits": self.min_hits,
             "max_events": self.max_events,
+            "campaign_alerts": {
+                "critical": "max escalation level 4",
+                "warning": "level 3 with 3+ actors or 10+ hits, or 5+ actors and 20+ hits",
+            },
             "scoring_effect": "none",
             "network_geography_used": False,
         }
