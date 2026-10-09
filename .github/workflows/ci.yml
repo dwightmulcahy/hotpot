@@ -57,7 +57,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          PYTHONWARNINGS=default::ResourceWarning python -m unittest discover -s tests -v 2>&1 | tee /tmp/hotpot-tests.log
+          PYTHONWARNINGS=default::ResourceWarning python -X tracemalloc=10 -m unittest discover -s tests -v 2>&1 | tee /tmp/hotpot-tests.log
           if grep -q "ResourceWarning: unclosed database" /tmp/hotpot-tests.log; then
             echo "Detected an unclosed sqlite3.Connection under Python 3.14"
             exit 1
