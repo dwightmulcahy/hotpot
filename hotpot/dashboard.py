@@ -17,9 +17,10 @@ def render_dashboard(snapshot: dict[str, Any], runtime: dict[str, Any]) -> str:
         )
 
     recent_cols = [
-        ("ts", "Time"), ("ip", "IP"), ("method", "Method"), ("path", "Path"),
+        ("ts", "Time"), ("client_ip", "IP"), ("method", "Method"), ("path", "Path"),
         ("category", "Category"), ("scanner", "Scanner"), ("severity", "Sev"),
-        ("escalation_level", "Level"),
+        ("escalation_level", "Level"), ("session_id", "Session"),
+        ("bait_stage", "Bait stage"), ("tarpit_style", "Tarpit"),
     ]
     offender_cols = [
         ("ip", "IP"), ("hits", "Hits"), ("score", "Score"),
@@ -29,6 +30,14 @@ def render_dashboard(snapshot: dict[str, Any], runtime: dict[str, Any]) -> str:
     fp_cols = [
         ("fingerprint", "Fingerprint"), ("scanner_family", "Family"),
         ("category", "Category"), ("hits", "Hits"), ("unique_ips", "IPs"),
+    ]
+    bait_cols = [
+        ("bait_id", "Bait"), ("stage", "Stage"), ("hits", "Events"),
+    ]
+    session_cols = [
+        ("session_id", "Session"), ("client_ip", "IP"), ("steps", "Steps"),
+        ("bait_events", "Bait events"), ("last_path", "Last path"),
+        ("last_seen", "Last seen"),
     ]
 
     def table(title: str, items: list[dict[str, Any]], columns: list[tuple[str, str]]) -> str:
@@ -42,13 +51,17 @@ def render_dashboard(snapshot: dict[str, Any], runtime: dict[str, Any]) -> str:
         ) or "<li class='muted'>No events yet</li>"
         return f"<section><h2>{esc(title)}</h2><ul class='rank'>{body}</ul></section>"
 
+    bait_funnel = snapshot.get("bait_funnel", [])
+    top_sessions = snapshot.get("top_sessions", [])
+    bait_engagements = sum(int(item.get("hits", 0)) for item in bait_funnel)
+
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Hotpot Attack Intelligence</title>
 <style>
 :root {{ color-scheme: dark; font-family: ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }}
 body {{ margin:0; background:#0d1117; color:#e6edf3; }}
-main {{ max-width:1400px; margin:auto; padding:24px; }}
+main {{ max-width:1500px; margin:auto; padding:24px; }}
 h1 {{ margin:0 0 4px; font-size:28px; }} .sub,.muted {{ color:#8b949e; }}
 .cards {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:12px; margin:22px 0; }}
 .card,section {{ background:#161b22; border:1px solid #30363d; border-radius:10px; padding:16px; }}
@@ -60,20 +73,23 @@ table {{ width:100%; border-collapse:collapse; font-size:12px; }} th,td {{ text-
 code {{ color:#79c0ff; }} a {{ color:#58a6ff; }}
 </style></head><body><main>
 <h1>🍯 Hotpot Attack Intelligence</h1>
-<div class="sub">Transparent deception proxy · refresh for current data</div>
+<div class="sub">Transparent deception proxy · session-aware WordPress lures · refresh for current data</div>
 <div class="cards">
   <div class="card"><span>Total probe events</span><strong>{esc(snapshot['events'])}</strong></div>
   <div class="card"><span>Unique source IPs</span><strong>{esc(snapshot['unique_ips'])}</strong></div>
   <div class="card"><span>Runtime deceptions</span><strong>{esc(runtime.get('deceptions',0))}</strong></div>
   <div class="card"><span>Runtime tarpits</span><strong>{esc(runtime.get('tarpits',0))}</strong></div>
+  <div class="card"><span>Bait engagements</span><strong>{esc(bait_engagements)}</strong></div>
 </div>
 <div class="grid">
 {mini('Top probe paths', snapshot['top_paths'], 'path')}
 {mini('Top attack categories', snapshot['top_categories'], 'category')}
 {mini('Scanner identification', snapshot['top_scanners'], 'scanner')}
 </div>
+{table('Vulnerability bait funnel', bait_funnel, bait_cols)}
+{table('Attacker journeys', top_sessions, session_cols)}
 {table('Top repeat offenders', snapshot['top_offenders'], offender_cols)}
 {table('Attack fingerprints', snapshot['top_fingerprints'], fp_cols)}
 {table('Recent activity', snapshot['recent'], recent_cols)}
-<p class="sub">Bodies and submitted credentials are intentionally not stored.</p>
+<p class="sub">Bodies, uploaded files, and submitted credentials are intentionally not stored. Session and bait analytics use request metadata only.</p>
 </main></body></html>"""
