@@ -32,7 +32,25 @@ paths = ["/wp-json", "/wp-json/"]
 category = "wordpress-enumeration"
 status = 200
 content_type = "application/json; charset=utf-8"
-response = """{"name":"Monkey Head Brewing","description":"","url":"https://www.monkeyheadbrewing.com","home":"https://www.monkeyheadbrewing.com","namespaces":["oembed/1.0","wp/v2"],"authentication":{}}"""
+response = "{}"
+
+[[rule]]
+name = "wordpress-rest-users"
+action = "deceive"
+paths = ["/wp-json/wp/v2/users", "/wp-json/wp/v2/users/"]
+category = "wordpress-user-enumeration"
+status = 200
+content_type = "application/json; charset=utf-8"
+response = "[]"
+
+[[rule]]
+name = "wordpress-rest-posts"
+action = "deceive"
+paths = ["/wp-json/wp/v2/posts", "/wp-json/wp/v2/posts/"]
+category = "wordpress-enumeration"
+status = 200
+content_type = "application/json; charset=utf-8"
+response = "[]"
 
 [[rule]]
 name = "wordpress-readme"
@@ -41,7 +59,43 @@ paths = ["/readme.html"]
 category = "wordpress-enumeration"
 status = 200
 content_type = "text/html; charset=utf-8"
-response = """<!doctype html><html><head><meta charset="UTF-8"><title>WordPress › ReadMe</title></head><body><h1>WordPress</h1><p>Semantic Personal Publishing Platform</p><p>Version 6.4.3</p></body></html>"""
+response = "WordPress"
+
+[[rule]]
+name = "wordpress-theme-style"
+action = "deceive"
+paths = ["/wp-content/themes/twentytwentythree/style.css"]
+category = "wordpress-theme-enumeration"
+status = 200
+content_type = "text/css; charset=utf-8"
+response = "/* Theme Name: Twenty Twenty-Three */"
+
+[[rule]]
+name = "wordpress-sitemap"
+action = "deceive"
+paths = ["/wp-sitemap.xml"]
+category = "wordpress-enumeration"
+status = 200
+content_type = "application/xml; charset=utf-8"
+response = "<?xml version=\"1.0\"?><sitemapindex/>"
+
+[[rule]]
+name = "wordpress-feed"
+action = "deceive"
+paths = ["/feed/", "/feed"]
+category = "wordpress-enumeration"
+status = 200
+content_type = "application/rss+xml; charset=utf-8"
+response = "<?xml version=\"1.0\"?><rss version=\"2.0\"></rss>"
+
+[[rule]]
+name = "wordpress-author-enum"
+action = "deceive"
+regex = ["^/\\?author=1$"]
+category = "wordpress-user-enumeration"
+status = 200
+content_type = "text/html; charset=utf-8"
+response = "admin"
 
 [[rule]]
 name = "wordpress-wlw-manifest"
@@ -51,6 +105,15 @@ category = "wordpress-enumeration"
 status = 200
 content_type = "text/xml; charset=utf-8"
 response = """<?xml version="1.0" encoding="UTF-8"?><manifest xmlns="http://schemas.microsoft.com/wlw/manifest/weblog"><options><clientType>WordPress</clientType><supportsKeywords>Yes</supportsKeywords></options></manifest>"""
+
+[[rule]]
+name = "wordpress-canary"
+action = "tarpit"
+paths = ["/wp-content/uploads/.cache/wp-maintenance.json"]
+category = "wordpress-canary-followup"
+status = 200
+content_type = "application/json; charset=utf-8"
+response = "{}"
 
 # Deliberate vulnerability lures. These responses advertise old plugin versions only;
 # Hotpot never executes plugin code and never stores submitted request bodies.
@@ -93,7 +156,7 @@ path_prefixes = ["/wp-content/plugins/wp-file-manager/lib/php/"]
 category = "wordpress-bait-followup"
 status = 200
 content_type = "application/json; charset=utf-8"
-response = "{\"added\":[],\"removed\":[],\"changed\":[]}" 
+response = "{\"added\":[],\"removed\":[],\"changed\":[]}"
 
 [[rule]]
 name = "wordpress-bait-contact-form-7-followup"
