@@ -5,7 +5,7 @@ paths = ["/wp-admin/install.php", "/wp-admin/setup-config.php"]
 category = "wordpress-install"
 status = 200
 content_type = "text/html; charset=utf-8"
-response = """<!doctype html><html><head><title>WordPress › Installation</title></head><body><h1>Welcome to WordPress</h1><p>Before getting started, we need some information on the database.</p></body></html>"""
+response = """<!doctype html><html><head><meta charset="UTF-8"><title>WordPress › Installation</title></head><body><h1>Welcome to WordPress</h1><p>Before getting started, we need some information on the database.</p></body></html>"""
 
 [[rule]]
 name = "wordpress-login"
@@ -14,7 +14,7 @@ paths = ["/wp-login.php"]
 category = "wordpress-login"
 status = 200
 content_type = "text/html; charset=utf-8"
-response = """<!doctype html><html><head><title>Log In ‹ WordPress</title></head><body><form method=post><input name=log><input name=pwd type=password><button>Log In</button></form></body></html>"""
+response = """<!doctype html><html><head><meta charset="UTF-8"><title>Log In ‹ WordPress</title></head><body class="login"><div id="login"><h1><a href="https://wordpress.org/">Powered by WordPress</a></h1><form method="post"><p><label>Username or Email Address<br><input name="log" type="text"></label></p><p><label>Password<br><input name="pwd" type="password"></label></p><p><button type="submit">Log In</button></p></form></div></body></html>"""
 
 [[rule]]
 name = "wordpress-xmlrpc"
@@ -24,6 +24,94 @@ category = "wordpress-xmlrpc"
 status = 200
 content_type = "text/xml; charset=utf-8"
 response = "<?xml version=\"1.0\"?><methodResponse><params></params></methodResponse>"
+
+[[rule]]
+name = "wordpress-rest-api"
+action = "deceive"
+paths = ["/wp-json", "/wp-json/"]
+category = "wordpress-enumeration"
+status = 200
+content_type = "application/json; charset=utf-8"
+response = """{"name":"Monkey Head Brewing","description":"","url":"https://www.monkeyheadbrewing.com","home":"https://www.monkeyheadbrewing.com","namespaces":["oembed/1.0","wp/v2"],"authentication":{}}"""
+
+[[rule]]
+name = "wordpress-readme"
+action = "deceive"
+paths = ["/readme.html"]
+category = "wordpress-enumeration"
+status = 200
+content_type = "text/html; charset=utf-8"
+response = """<!doctype html><html><head><meta charset="UTF-8"><title>WordPress › ReadMe</title></head><body><h1>WordPress</h1><p>Semantic Personal Publishing Platform</p><p>Version 6.4.3</p></body></html>"""
+
+[[rule]]
+name = "wordpress-wlw-manifest"
+action = "deceive"
+paths = ["/wp-includes/wlwmanifest.xml"]
+category = "wordpress-enumeration"
+status = 200
+content_type = "text/xml; charset=utf-8"
+response = """<?xml version="1.0" encoding="UTF-8"?><manifest xmlns="http://schemas.microsoft.com/wlw/manifest/weblog"><options><clientType>WordPress</clientType><supportsKeywords>Yes</supportsKeywords></options></manifest>"""
+
+# Deliberate vulnerability lures. These responses advertise old plugin versions only;
+# Hotpot never executes plugin code and never stores submitted request bodies.
+[[rule]]
+name = "wordpress-bait-file-manager-readme"
+action = "deceive"
+paths = ["/wp-content/plugins/wp-file-manager/readme.txt"]
+category = "wordpress-vulnerability-bait"
+status = 200
+content_type = "text/plain; charset=utf-8"
+response = """=== File Manager ===
+Contributors: mndpsingh287
+Stable tag: 6.8
+Requires at least: 4.0
+Tested up to: 5.4
+
+File Manager for WordPress.
+"""
+
+[[rule]]
+name = "wordpress-bait-contact-form-7-readme"
+action = "deceive"
+paths = ["/wp-content/plugins/contact-form-7/readme.txt"]
+category = "wordpress-vulnerability-bait"
+status = 200
+content_type = "text/plain; charset=utf-8"
+response = """=== Contact Form 7 ===
+Contributors: takayukister
+Stable tag: 5.3.1
+Requires at least: 5.4
+Tested up to: 5.6
+
+Contact Form 7 can manage multiple contact forms.
+"""
+
+[[rule]]
+name = "wordpress-bait-file-manager-followup"
+action = "tarpit"
+path_prefixes = ["/wp-content/plugins/wp-file-manager/lib/php/"]
+category = "wordpress-bait-followup"
+status = 200
+content_type = "application/json; charset=utf-8"
+response = "{\"added\":[],\"removed\":[],\"changed\":[]}" 
+
+[[rule]]
+name = "wordpress-bait-contact-form-7-followup"
+action = "tarpit"
+path_prefixes = ["/wp-json/contact-form-7/"]
+category = "wordpress-bait-followup"
+status = 200
+content_type = "application/json; charset=utf-8"
+response = "{\"status\":\"mail_sent\",\"message\":\"Thank you for your message.\"}"
+
+[[rule]]
+name = "wordpress-plugin-enumeration"
+action = "deceive"
+regex = ["^/wp-content/plugins/[^/]+/(?:readme\\.txt|changelog\\.txt)$"]
+category = "wordpress-plugin-enumeration"
+status = 404
+content_type = "text/plain; charset=utf-8"
+response = "Not Found"
 
 [[rule]]
 name = "wordpress-tree"
