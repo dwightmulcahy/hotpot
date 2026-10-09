@@ -176,7 +176,6 @@ class IntelligenceStore:
             if row is not None:
                 last = datetime.fromisoformat(row["last_notified_at"])
                 age = (now - last).total_seconds()
-                # Always alert on a new higher escalation level; otherwise respect cooldown.
                 if level <= row["last_notified_level"] and age < cooldown_seconds:
                     return False
             conn.execute(
@@ -209,7 +208,6 @@ class IntelligenceStore:
             conn.execute("DELETE FROM notification_state WHERE ip NOT IN (SELECT ip FROM attackers)")
             after_events = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
             after_attackers = conn.execute("SELECT COUNT(*) FROM attackers").fetchone()[0]
-        # Checkpoint only after the cleanup transaction has committed.
         with self._connection() as conn:
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         return {
@@ -250,7 +248,6 @@ class IntelligenceStore:
                 details = {}
             if isinstance(details, dict):
                 event.update(details)
-        # Public API consistently exposes the source identity as client_ip.
         if "ip" in event:
             event["client_ip"] = event.pop("ip")
         return event
@@ -295,6 +292,47 @@ class IntelligenceStore:
                 ORDER BY hits DESC LIMIT 10
                 """
             ).fetchall()
+            journey_rows = conn.execute(
+                "SELECT ts, ip, path, details_json FROM events ORDER BY id DESC LIMIT 1000"
+            ).fetchall()
+
+        bait_counts: dict[tuple[str, str], int] = {}
+        sessions: dict[str, dict[str, Any]] = {}
+        for row in journey_rows:
+            try:
+                details = json.loads(row["details_json"] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(details, dict):
+                continue
+            bait_id = details.get("bait_id")
+            bait_stage = details.get("bait_stage")
+            if bait_id and bait_stage:
+                key = (str(bait_id), str(bait_stage))
+                bait_counts[key] = bait_counts.get(key, 0) + 1
+            session_id = details.get("session_id")
+            if session_id:
+                current = sessions.setdefault(str(session_id), {
+                    "session_id": str(session_id),
+                    "client_ip": row["ip"],
+                    "steps": 0,
+                    "bait_events": 0,
+                    "last_path": row["path"],
+                    "last_seen": row["ts"],
+                })
+                current["steps"] += 1
+                if bait_stage:
+                    current["bait_events"] += 1
+
+        bait_funnel = [
+            {"bait_id": bait_id, "stage": stage, "hits": hits}
+            for (bait_id, stage), hits in bait_counts.items()
+        ]
+        bait_funnel.sort(key=lambda item: (-item["hits"], item["bait_id"], item["stage"]))
+        top_sessions = sorted(
+            sessions.values(),
+            key=lambda item: (-item["bait_events"], -item["steps"], item["session_id"]),
+        )[:10]
 
         def rows(values: list[sqlite3.Row]) -> list[dict[str, Any]]:
             return [dict(row) for row in values]
@@ -304,5 +342,6 @@ class IntelligenceStore:
             "top_paths": rows(top_paths), "top_categories": rows(top_categories),
             "top_scanners": rows(top_scanners), "top_offenders": rows(offenders),
             "top_fingerprints": rows(fingerprints),
+            "bait_funnel": bait_funnel[:20], "top_sessions": top_sessions,
             "recent": [self._expand_event_row(row) for row in recent],
         }
