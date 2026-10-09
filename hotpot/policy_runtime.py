@@ -8,10 +8,11 @@ from .app import HOTPOT_APP_KEY
 from .config import Settings
 from .deployment import deployment_snapshot
 from .policy import RuntimePolicyStore
+from .production_deception import ProductionDeceptionMixin
 from .server import HotpotServer
 
 
-class PolicyHotpotServer(HotpotServer):
+class PolicyHotpotServer(ProductionDeceptionMixin, HotpotServer):
     """Hotpot runtime with durable dashboard-managed policy layered over env policy."""
 
     def __init__(self, settings: Settings):
