@@ -4,9 +4,10 @@ import asyncio
 import hashlib
 import json
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from .notification_digest import NotificationDigestStore
 
@@ -27,10 +28,15 @@ class NotificationSpool:
         self.digest = NotificationDigestStore(data_dir)
         self._initialize()
 
-    def _connection(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connection(self) -> Iterator[sqlite3.Connection]:
         conn = sqlite3.connect(self.path, timeout=10)
         conn.row_factory = sqlite3.Row
-        return conn
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     def _initialize(self) -> None:
         with self._connection() as conn:
