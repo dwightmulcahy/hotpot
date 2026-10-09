@@ -32,7 +32,7 @@ paths = ["/wp-json", "/wp-json/"]
 category = "wordpress-enumeration"
 status = 200
 content_type = "application/json; charset=utf-8"
-response = "{}"
+response = """{"name":"Monkey Head Brewing","description":"","url":"https://www.monkeyheadbrewing.com","home":"https://www.monkeyheadbrewing.com","namespaces":["oembed/1.0","wp/v2","contact-form-7/v1"],"authentication":{}}"""
 
 [[rule]]
 name = "wordpress-rest-users"
