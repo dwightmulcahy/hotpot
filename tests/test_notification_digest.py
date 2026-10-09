@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -26,12 +27,12 @@ class NotificationDigestTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await store.notification_digest.pending_count(), 1)
 
             digest_path = root / "notification-digest.sqlite3"
-            with sqlite3.connect(digest_path) as conn:
-                conn.execute(
-                    "UPDATE notification_digest SET due_at=? WHERE status='pending'",
-                    ((datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(),),
-                )
-                conn.commit()
+            with closing(sqlite3.connect(digest_path)) as conn:
+                with conn:
+                    conn.execute(
+                        "UPDATE notification_digest SET due_at=? WHERE status='pending'",
+                        ((datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(),),
+                    )
 
             spool = NotificationSpool(root, retry_seconds=60)
             jobs = await spool.due(limit=10)
