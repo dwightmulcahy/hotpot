@@ -4,7 +4,7 @@ import hashlib
 import json
 import random
 import time
-from collections import defaultdict, deque
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -119,10 +119,13 @@ class DeceptionSessions:
 
     def observe(self, *, ip: str, fingerprint: str, path: str, rule_name: str, category: str) -> dict[str, Any]:
         now = time.monotonic()
-        key = f"{ip}|{fingerprint}"
+        # The request fingerprint intentionally contains the path, so it is unsuitable
+        # as the primary session key. Source IP keeps a scanner journey coherent across
+        # endpoint changes; the fingerprint remains recorded on every event for analysis.
+        key = ip
         state = self._sessions.get(key)
         if state is None or now - state.last_seen > self.timeout_seconds:
-            session_id = hashlib.sha256(f"{key}|{time.time_ns()}".encode()).hexdigest()[:16]
+            session_id = hashlib.sha256(f"{ip}|{fingerprint}|{time.time_ns()}".encode()).hexdigest()[:16]
             state = SessionState(session_id=session_id, last_seen=now)
             self._sessions[key] = state
         state.last_seen = now
