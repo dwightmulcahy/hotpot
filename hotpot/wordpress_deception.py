@@ -41,7 +41,10 @@ class WordPressPersona:
             canary_path="/wp-content/uploads/.cache/wp-maintenance.json",
         )
         try:
-            path.write_text(json.dumps(persona.__dict__, indent=2, sort_keys=True), encoding="utf-8")
+            path.write_text(
+                json.dumps(persona.__dict__, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
         except OSError:
             pass
         return persona
@@ -49,32 +52,45 @@ class WordPressPersona:
     def render(self, rule_name: str, fallback: str) -> str:
         p = self
         if rule_name == "wordpress-rest-api":
-            return json.dumps({
-                "name": p.site_name,
-                "description": "",
-                "url": p.site_url,
-                "home": p.site_url,
-                "namespaces": ["oembed/1.0", "wp/v2", "contact-form-7/v1"],
-                "authentication": {},
-                "_links": {"help": [{"href": p.site_url + p.canary_path}]},
-            }, separators=(",", ":"))
+            return json.dumps(
+                {
+                    "name": p.site_name,
+                    "description": "",
+                    "url": p.site_url,
+                    "home": p.site_url,
+                    "namespaces": ["oembed/1.0", "wp/v2", "contact-form-7/v1"],
+                    "authentication": {},
+                    "_links": {"help": [{"href": p.site_url + p.canary_path}]},
+                },
+                separators=(",", ":"),
+            )
         if rule_name == "wordpress-rest-users":
-            return json.dumps([{
-                "id": 1,
-                "name": "admin",
-                "slug": "admin",
-                "link": p.site_url + "/author/admin/",
-            }], separators=(",", ":"))
+            return json.dumps(
+                [
+                    {
+                        "id": 1,
+                        "name": "admin",
+                        "slug": "admin",
+                        "link": p.site_url + "/author/admin/",
+                    }
+                ],
+                separators=(",", ":"),
+            )
         if rule_name == "wordpress-rest-posts":
-            return json.dumps([{
-                "id": 42,
-                "date": "2026-09-28T10:15:00",
-                "slug": "oktoberfest",
-                "status": "publish",
-                "link": p.site_url + "/oktoberfest/",
-                "title": {"rendered": "Oktoberfest"},
-                "author": 1,
-            }], separators=(",", ":"))
+            return json.dumps(
+                [
+                    {
+                        "id": 42,
+                        "date": "2026-09-28T10:15:00",
+                        "slug": "oktoberfest",
+                        "status": "publish",
+                        "link": p.site_url + "/oktoberfest/",
+                        "title": {"rendered": "Oktoberfest"},
+                        "author": 1,
+                    }
+                ],
+                separators=(",", ":"),
+            )
         if rule_name == "wordpress-readme":
             return (
                 "<!doctype html><html><head><meta charset='UTF-8'><title>WordPress › ReadMe</title></head>"
@@ -99,7 +115,10 @@ class WordPressPersona:
         if rule_name == "wordpress-author-enum":
             return f"<!doctype html><title>admin – {p.site_name}</title><h1 class='author-title'>admin</h1>"
         if rule_name == "wordpress-canary":
-            return json.dumps({"maintenance": False, "generated_by": "wp-cron"}, separators=(",", ":"))
+            return json.dumps(
+                {"maintenance": False, "generated_by": "wp-cron"},
+                separators=(",", ":"),
+            )
         return fallback
 
 
@@ -117,15 +136,31 @@ class DeceptionSessions:
         self.timeout_seconds = timeout_seconds
         self._sessions: dict[str, SessionState] = {}
 
-    def observe(self, *, ip: str, fingerprint: str, path: str, rule_name: str, category: str) -> dict[str, Any]:
+    def observe(
+        self,
+        *,
+        path: str,
+        rule_name: str,
+        category: str,
+        actor_fingerprint: str | None = None,
+        request_fingerprint: str | None = None,
+        ip: str | None = None,
+        fingerprint: str | None = None,
+    ) -> dict[str, Any]:
+        """Observe one deceptive request and return journey/velocity metadata.
+
+        ``actor_fingerprint`` is the preferred path-independent key. ``ip`` and
+        ``fingerprint`` remain accepted for compatibility with older callers, but new
+        production code should always provide the actor fingerprint explicitly.
+        """
         now = time.monotonic()
-        # The request fingerprint intentionally contains the path, so it is unsuitable
-        # as the primary session key. Source IP keeps a scanner journey coherent across
-        # endpoint changes; the fingerprint remains recorded on every event for analysis.
-        key = ip
+        request_fp = request_fingerprint or fingerprint or ""
+        key = actor_fingerprint or ip or request_fp or "unknown"
         state = self._sessions.get(key)
         if state is None or now - state.last_seen > self.timeout_seconds:
-            session_id = hashlib.sha256(f"{ip}|{fingerprint}|{time.time_ns()}".encode()).hexdigest()[:16]
+            session_id = hashlib.sha256(
+                f"{key}|{request_fp}|{time.time_ns()}".encode()
+            ).hexdigest()[:16]
             state = SessionState(session_id=session_id, last_seen=now)
             self._sessions[key] = state
         state.last_seen = now
@@ -181,11 +216,22 @@ def velocity_severity_bonus(observation: dict[str, Any]) -> int:
     return 0
 
 
-def tarpit_profile(*, rule_name: str, observation: dict[str, Any], fingerprint: str,
-                   base_initial: float, base_chunk_delay: float) -> dict[str, Any]:
-    seed = int(hashlib.sha256(f"{fingerprint}|{rule_name}".encode()).hexdigest()[:8], 16)
+def tarpit_profile(
+    *,
+    rule_name: str,
+    observation: dict[str, Any],
+    fingerprint: str,
+    base_initial: float,
+    base_chunk_delay: float,
+) -> dict[str, Any]:
+    seed = int(
+        hashlib.sha256(f"{fingerprint}|{rule_name}".encode()).hexdigest()[:8], 16
+    )
     rng = random.Random(seed)
-    aggressive = observation["hits_10s"] >= 6 or observation["bait_stage"] in {"exploit-attempt", "canary-followed"}
+    aggressive = observation["hits_10s"] >= 6 or observation["bait_stage"] in {
+        "exploit-attempt",
+        "canary-followed",
+    }
     if "xmlrpc" in rule_name:
         style = "fake-processing"
         initial = max(base_initial, 1.5)
