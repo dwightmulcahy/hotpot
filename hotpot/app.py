@@ -17,6 +17,12 @@ from .network import Allowlist, ClientIdentity, ClientIPResolver
 from .notifications import Notifier
 from .rules import Rule, RuleEngine
 from .store import IntelligenceStore
+from .wordpress_deception import (
+    DeceptionSessions,
+    WordPressPersona,
+    tarpit_profile,
+    velocity_severity_bonus,
+)
 
 HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -40,7 +46,6 @@ def clean_headers(headers, *, response: bool = False) -> CIMultiDict:
     return out
 
 
-
 def transport_peer_ip(request: web.Request) -> str:
     peer = request.transport.get_extra_info("peername") if request.transport else None
     return peer[0] if peer else "unknown"
@@ -55,6 +60,8 @@ class Hotpot:
         self.allowlist = Allowlist(settings.allow_cidrs)
         self.client_ips = ClientIPResolver(settings.client_ip_mode, settings.trusted_proxy_cidrs)
         self.notifier = Notifier(settings)
+        self.wordpress_persona = WordPressPersona.load_or_create(settings.data_dir)
+        self.deception_sessions = DeceptionSessions(timeout_seconds=900.0)
         self.client: ClientSession | None = None
         self.housekeeping_task: asyncio.Task | None = None
         self.tarpit_slots = asyncio.Semaphore(settings.tarpit_max_concurrent)
@@ -63,8 +70,6 @@ class Hotpot:
         self.started = time.monotonic()
 
     async def startup(self, app: web.Application) -> None:
-        # Run cleanup before opening the outbound client so a startup cleanup failure
-        # cannot leak a ClientSession.
         await self.run_housekeeping()
         timeout = ClientTimeout(total=self.settings.upstream_timeout)
         self.client = ClientSession(timeout=timeout, auto_decompress=False)
@@ -126,6 +131,12 @@ class Hotpot:
                 "max_seconds": self.settings.tarpit_max_seconds,
                 "escalated_max_seconds": self.settings.tarpit_escalated_max_seconds,
             },
+            "wordpress_persona": {
+                "version": self.wordpress_persona.wordpress_version,
+                "theme": self.wordpress_persona.theme,
+                "locale": self.wordpress_persona.locale,
+                "timezone": self.wordpress_persona.timezone,
+            },
             "client_ip": {
                 "mode": self.settings.client_ip_mode,
                 "trusted_proxy_cidrs": self.settings.trusted_proxy_cidrs,
@@ -149,6 +160,7 @@ class Hotpot:
                 "unique_ips": snapshot["unique_ips"],
                 "top_categories": snapshot["top_categories"][:5],
                 "top_offenders": snapshot["top_offenders"][:5],
+                "bait_funnel": snapshot.get("bait_funnel", [])[:10],
             },
             "uptime_seconds": int(time.monotonic() - self.started),
         })
@@ -178,7 +190,6 @@ class Hotpot:
         return web.json_response(await self.store.attacker_history(ip, limit=100))
 
     async def handler(self, request: web.Request) -> web.StreamResponse:
-        # Reserve these before the catch-all route/proxy path.
         if request.path == "/_hotpot/health":
             return await self.health(request)
         if request.path == "/_hotpot/status":
@@ -198,6 +209,8 @@ class Hotpot:
             return await self.proxy_http(request)
 
         rule = self.rules.match(request.path, request.method)
+        if rule is None and request.query_string:
+            rule = self.rules.match(request.path_qs, request.method)
         if rule:
             return await self.deception(request, rule)
 
@@ -210,19 +223,41 @@ class Hotpot:
         ip = identity.client_ip
         user_agent = request.headers.get("User-Agent", "")
         classification = classify(user_agent, rule.category, request.method, request.path_qs)
+        observation = self.deception_sessions.observe(
+            ip=ip,
+            fingerprint=classification.fingerprint,
+            path=request.path_qs,
+            rule_name=rule.name,
+            category=rule.category,
+        )
+        severity = min(5, classification.severity + velocity_severity_bonus(observation))
+        response_text = (
+            self.wordpress_persona.render(rule.name, rule.response)
+            if rule.profile == "wordpress" else rule.response
+        )
 
-        # Serialize the small state read/update section so simultaneous probes from one source
-        # cannot lose score increments. Tarpit/proxy work happens outside this lock.
         async with self.intelligence_lock:
             prior = await self.store.state_for(ip)
             escalation = escalation_for(
-                prior_hits=prior.hits, prior_score=prior.score, severity=classification.severity,
+                prior_hits=prior.hits,
+                prior_score=prior.score,
+                severity=severity,
                 base_seconds=self.settings.tarpit_max_seconds,
                 max_escalated_seconds=self.settings.tarpit_escalated_max_seconds,
             )
             effective_action = rule.action
             if escalation.force_tarpit and self.settings.tarpit_enabled:
                 effective_action = "tarpit"
+
+            profile = None
+            if effective_action == "tarpit" and self.settings.tarpit_enabled:
+                profile = tarpit_profile(
+                    rule_name=rule.name,
+                    observation=observation,
+                    fingerprint=classification.fingerprint,
+                    base_initial=self.settings.tarpit_initial_delay,
+                    base_chunk_delay=self.settings.tarpit_chunk_delay,
+                )
 
             event = {
                 "event": "deception",
@@ -243,10 +278,23 @@ class Hotpot:
                 "scanner": classification.scanner,
                 "scanner_family": classification.scanner_family,
                 "fingerprint": classification.fingerprint,
-                "severity": classification.severity,
+                "severity": severity,
+                "base_severity": classification.severity,
                 "escalation_level": escalation.level,
                 "attacker_score": escalation.score,
                 "prior_hits": prior.hits,
+                "session_id": observation["session_id"],
+                "session_step": observation["session_step"],
+                "hits_10s": observation["hits_10s"],
+                "hits_60s": observation["hits_60s"],
+                "unique_paths_60s": observation["unique_paths_60s"],
+                "bait_id": observation["bait_id"],
+                "bait_stage": observation["bait_stage"],
+                "bait_followed": observation["bait_followed"],
+                "tarpit_style": profile["style"] if profile else None,
+                "content_type": request.headers.get("Content-Type", ""),
+                "content_length": request.content_length,
+                "query_parameter_names": sorted(request.query.keys()),
             }
             await self.store.record(event, score=escalation.score, escalation_level=escalation.level)
 
@@ -254,12 +302,25 @@ class Hotpot:
         self.stats[f"category:{rule.category}"] += 1
         self.stats[f"scanner:{classification.scanner}"] += 1
         self.stats[f"escalation:{escalation.level}"] += 1
+        if observation["bait_stage"]:
+            self.stats[f"bait:{observation['bait_stage']}"] += 1
         await self.events.write(event)
         await self.maybe_notify(event)
 
         if effective_action == "tarpit" and self.settings.tarpit_enabled:
-            return await self.tarpit(request, rule, max_seconds=escalation.tarpit_seconds)
-        return web.Response(status=rule.status, text=rule.response, content_type=rule.content_type.split(";", 1)[0])
+            assert profile is not None
+            return await self.tarpit(
+                request,
+                rule,
+                response_text=response_text,
+                max_seconds=escalation.tarpit_seconds,
+                profile=profile,
+            )
+        return web.Response(
+            status=rule.status,
+            text=response_text,
+            content_type=rule.content_type.split(";", 1)[0],
+        )
 
     async def maybe_notify(self, event: dict) -> None:
         if not self.notifier.enabled:
@@ -293,28 +354,44 @@ class Hotpot:
                 "error": type(exc).__name__,
             })
 
-    async def tarpit(self, request: web.Request, rule: Rule, *, max_seconds: float | None = None) -> web.StreamResponse:
-        # Do not queue attackers forever if all tarpit slots are occupied.
+    async def tarpit(
+        self,
+        request: web.Request,
+        rule: Rule,
+        *,
+        response_text: str,
+        max_seconds: float | None = None,
+        profile: dict | None = None,
+    ) -> web.StreamResponse:
         try:
             await asyncio.wait_for(self.tarpit_slots.acquire(), timeout=0.05)
         except TimeoutError:
             self.stats["tarpit_overflow"] += 1
-            return web.Response(status=rule.status, text=rule.response,
-                                content_type=rule.content_type.split(";", 1)[0])
+            return web.Response(
+                status=rule.status,
+                text=response_text,
+                content_type=rule.content_type.split(";", 1)[0],
+            )
 
         self.stats["tarpits"] += 1
         started = time.monotonic()
+        profile = profile or {
+            "style": "chunked-drip",
+            "initial_delay": self.settings.tarpit_initial_delay,
+            "chunk_delay": self.settings.tarpit_chunk_delay,
+            "chunk_size": 32,
+        }
         try:
-            await asyncio.sleep(self.settings.tarpit_initial_delay)
+            await asyncio.sleep(float(profile["initial_delay"]))
             resp = web.StreamResponse(status=rule.status)
             resp.headers["Content-Type"] = rule.content_type
-            # Deliberately omit Content-Length so the scanner must wait on the stream.
             await resp.prepare(request)
-            body = rule.response.encode("utf-8") or b" "
+            body = response_text.encode("utf-8") or b" "
             pos = 0
             lifetime = max_seconds if max_seconds is not None else self.settings.tarpit_max_seconds
             while time.monotonic() - started < lifetime:
-                chunk = body[pos:pos + 32]
+                chunk_size = int(profile["chunk_size"])
+                chunk = body[pos:pos + chunk_size]
                 if not chunk:
                     pos = 0
                     chunk = b" "
@@ -324,7 +401,7 @@ class Hotpot:
                     await resp.write(chunk)
                 except (ConnectionResetError, RuntimeError):
                     break
-                await asyncio.sleep(self.settings.tarpit_chunk_delay)
+                await asyncio.sleep(float(profile["chunk_delay"]))
             try:
                 await resp.write_eof()
             except (ConnectionResetError, RuntimeError):
@@ -342,8 +419,6 @@ class Hotpot:
     def forwarding_headers(self, request: web.Request) -> CIMultiDict:
         headers = clean_headers(request.headers)
         identity = self.client_identity(request)
-        # Normalize these headers at Hotpot's trust boundary instead of forwarding
-        # an attacker-controlled chain from outside the trusted proxy path.
         headers["X-Forwarded-For"] = identity.client_ip
         headers["X-Real-IP"] = identity.client_ip
         headers["X-Forwarded-Proto"] = request.headers.get("X-Forwarded-Proto", request.scheme)
@@ -400,13 +475,14 @@ class Hotpot:
         parsed = urlsplit(self.settings.upstream)
         target = f"{scheme}://{parsed.netloc}{parsed.path.rstrip('/')}{request.rel_url}"
         headers = self.forwarding_headers(request)
-        # aiohttp creates websocket-specific headers itself.
         for name in list(headers):
             if name.lower().startswith("sec-websocket-"):
                 del headers[name]
 
         try:
-            async with self.client.ws_connect(target, headers=headers, autoclose=True, autoping=True) as ws_upstream:
+            async with self.client.ws_connect(
+                target, headers=headers, autoclose=True, autoping=True
+            ) as ws_upstream:
                 async def client_to_upstream() -> None:
                     async for msg in ws_server:
                         if msg.type == WSMsgType.TEXT:
@@ -427,14 +503,20 @@ class Hotpot:
                             await ws_server.close()
                             return
 
-                tasks = [asyncio.create_task(client_to_upstream()), asyncio.create_task(upstream_to_client())]
-                done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                tasks = [
+                    asyncio.create_task(client_to_upstream()),
+                    asyncio.create_task(upstream_to_client()),
+                ]
+                _, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
                 for task in pending:
                     task.cancel()
                 await asyncio.gather(*pending, return_exceptions=True)
         except Exception as exc:
-            await self.events.write({"event": "websocket_error", "path": request.path_qs,
-                                     "error": type(exc).__name__})
+            await self.events.write({
+                "event": "websocket_error",
+                "path": request.path_qs,
+                "error": type(exc).__name__,
+            })
             await ws_server.close(code=1011, message=b"upstream websocket error")
         return ws_server
 
