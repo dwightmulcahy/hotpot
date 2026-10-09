@@ -55,8 +55,52 @@ def classify(user_agent: str, category: str, method: str, path: str) -> Classifi
     normalized_ua = _normalize_user_agent(user_agent)
     material = f"{method.upper()}|{category}|{path.split('?', 1)[0]}|{family}|{normalized_ua}"
     fingerprint = hashlib.sha256(material.encode("utf-8", "replace")).hexdigest()[:16]
-    return Classification(scanner=scanner, scanner_family=family,
-                          fingerprint=fingerprint, severity=severity)
+    return Classification(
+        scanner=scanner,
+        scanner_family=family,
+        fingerprint=fingerprint,
+        severity=severity,
+    )
+
+
+def actor_fingerprint(
+    *,
+    actor_key: str,
+    user_agent: str,
+    scanner_family: str,
+    accept: str = "",
+    accept_language: str = "",
+    accept_encoding: str = "",
+    http_version: str = "",
+    source_type: str = "ip",
+    worker_zone: str | None = None,
+) -> str:
+    """Return a path-independent correlation fingerprint for one observed actor.
+
+    The existing request fingerprint intentionally includes method/category/path and is
+    useful for grouping repeated probes. Journey correlation needs a different key:
+    one that stays stable as the scanner moves between endpoints while still reducing
+    accidental coalescing of unrelated clients behind the same NAT address.
+
+    Only low-sensitivity request traits are used. No cookies, authorization values,
+    request bodies, credentials, or payload contents contribute to this identifier.
+    ``actor_key`` already contains Hotpot's trusted network identity (including a
+    trusted Cloudflare Worker zone when applicable).
+    """
+    material = "|".join(
+        (
+            actor_key.strip().lower() or "unknown",
+            (source_type or "ip").strip().lower(),
+            (worker_zone or "").strip().lower(),
+            (scanner_family or "unknown").strip().lower(),
+            _normalize_user_agent(user_agent),
+            _normalize_header_value(accept, 192),
+            _normalize_header_value(accept_language, 96),
+            _normalize_header_value(accept_encoding, 96),
+            (http_version or "").strip().lower()[:32],
+        )
+    )
+    return hashlib.sha256(material.encode("utf-8", "replace")).hexdigest()[:20]
 
 
 def _normalize_user_agent(user_agent: str) -> str:
@@ -64,6 +108,12 @@ def _normalize_user_agent(user_agent: str) -> str:
     # different behavioral fingerprint.
     ua = user_agent.strip().lower()[:256]
     return re.sub(r"\d+(?:\.\d+)+", "<version>", ua)
+
+
+def _normalize_header_value(value: str, limit: int) -> str:
+    # Collapse insignificant whitespace while retaining capability/order hints that
+    # are useful for distinguishing automated HTTP clients sharing one address.
+    return " ".join(value.strip().lower().split())[:limit]
 
 
 def _severity(category: str, method: str) -> int:
@@ -87,8 +137,14 @@ class Escalation:
     tarpit_seconds: float
 
 
-def escalation_for(*, prior_hits: int, prior_score: int, severity: int,
-                   base_seconds: float, max_escalated_seconds: float) -> Escalation:
+def escalation_for(
+    *,
+    prior_hits: int,
+    prior_score: int,
+    severity: int,
+    base_seconds: float,
+    max_escalated_seconds: float,
+) -> Escalation:
     """Compute a bounded repeat-offender escalation policy.
 
     The score is intentionally simple and explainable. Escalation never bypasses the
@@ -107,5 +163,9 @@ def escalation_for(*, prior_hits: int, prior_score: int, severity: int,
         level, multiplier = 1, 1.0
 
     seconds = min(max_escalated_seconds, base_seconds * multiplier)
-    return Escalation(level=level, score=score, force_tarpit=level >= 2,
-                      tarpit_seconds=seconds)
+    return Escalation(
+        level=level,
+        score=score,
+        force_tarpit=level >= 2,
+        tarpit_seconds=seconds,
+    )
