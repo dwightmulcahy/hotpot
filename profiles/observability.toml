@@ -32,7 +32,7 @@ name = "elasticsearch-write"
 action = "tarpit"
 regex = ["^/_bulk$", "^/[^/]+/_doc(/|$)"]
 methods = ["POST", "PUT", "PATCH", "DELETE"]
-category = "observability-rce-probe"
+category = "observability-write-probe"
 status = 200
 content_type = "application/json; charset=utf-8"
 response = "{\"acknowledged\":true}"
