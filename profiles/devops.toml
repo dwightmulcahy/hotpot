@@ -1,0 +1,69 @@
+[[rule]]
+name = "jenkins-discovery"
+action = "deceive"
+paths = ["/jenkins/", "/jenkins/login", "/jenkins/api/json", "/computer/api/json"]
+methods = ["GET", "HEAD"]
+category = "devops-admin-discovery"
+status = 200
+content_type = "application/json; charset=utf-8"
+response = "{\"mode\":\"NORMAL\",\"nodeDescription\":\"the master Jenkins node\",\"numExecutors\":2}"
+
+[[rule]]
+name = "jenkins-script-console"
+action = "tarpit"
+paths = ["/script", "/scriptText", "/jenkins/script", "/jenkins/scriptText"]
+category = "jenkins-rce-probe"
+status = 200
+content_type = "text/html; charset=utf-8"
+response = "<html><head><title>Script Console [Jenkins]</title></head><body><h1>Script Console</h1></body></html>"
+
+[[rule]]
+name = "jenkins-credentials"
+action = "tarpit"
+path_prefixes = ["/credentials/", "/jenkins/credentials/"]
+category = "credential-discovery"
+status = 403
+content_type = "text/plain; charset=utf-8"
+response = "Forbidden"
+
+[[rule]]
+name = "ci-config-files"
+action = "deceive"
+paths = [
+  "/.gitlab-ci.yml",
+  "/Jenkinsfile",
+  "/.circleci/config.yml",
+  "/azure-pipelines.yml"
+]
+category = "devops-config-discovery"
+status = 404
+content_type = "text/plain; charset=utf-8"
+response = "Not Found"
+
+[[rule]]
+name = "github-workflow-files"
+action = "deceive"
+path_prefixes = ["/.github/workflows/"]
+category = "devops-config-discovery"
+status = 404
+content_type = "text/plain; charset=utf-8"
+response = "Not Found"
+
+[[rule]]
+name = "package-registry-credentials"
+action = "tarpit"
+paths = ["/.npmrc", "/.pypirc", "/.docker/config.json"]
+category = "credential-discovery"
+status = 403
+content_type = "text/plain; charset=utf-8"
+response = "Forbidden"
+
+[[rule]]
+name = "terraform-state"
+action = "tarpit"
+paths = ["/terraform.tfstate", "/terraform.tfstate.backup"]
+path_prefixes = ["/.terraform/"]
+category = "devops-secret-discovery"
+status = 403
+content_type = "application/json; charset=utf-8"
+response = "{\"version\":4,\"terraform_version\":\"1.8.5\",\"serial\":17,\"lineage\":\"2de88e78-8e02-49f5-8f59-45a5f43e77d6\",\"outputs\":{},\"resources\":[]}"
