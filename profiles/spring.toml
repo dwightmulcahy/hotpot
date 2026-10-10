@@ -1,0 +1,76 @@
+[[rule]]
+name = "spring-actuator-root"
+action = "deceive"
+paths = ["/actuator", "/actuator/"]
+methods = ["GET", "HEAD"]
+category = "spring-admin-discovery"
+status = 200
+content_type = "application/json; charset=utf-8"
+response = "{\"_links\":{\"self\":{\"href\":\"/actuator\"},\"health\":{\"href\":\"/actuator/health\"},\"info\":{\"href\":\"/actuator/info\"},\"env\":{\"href\":\"/actuator/env\"},\"mappings\":{\"href\":\"/actuator/mappings\"}}}"
+
+[[rule]]
+name = "spring-actuator-basic"
+action = "deceive"
+paths = ["/actuator/health", "/actuator/info"]
+methods = ["GET", "HEAD"]
+category = "spring-admin-discovery"
+status = 200
+content_type = "application/json; charset=utf-8"
+response = "{\"status\":\"UP\"}"
+
+[[rule]]
+name = "spring-actuator-sensitive"
+action = "tarpit"
+paths = [
+  "/actuator/env",
+  "/actuator/configprops",
+  "/actuator/beans",
+  "/actuator/mappings",
+  "/actuator/loggers",
+  "/actuator/conditions",
+  "/actuator/scheduledtasks"
+]
+methods = ["GET", "HEAD"]
+category = "spring-env-discovery"
+status = 200
+content_type = "application/json; charset=utf-8"
+response = "{\"activeProfiles\":[\"prod\"],\"propertySources\":[{\"name\":\"systemEnvironment\",\"properties\":{\"SPRING_PROFILES_ACTIVE\":{\"value\":\"prod\"}}}]}"
+
+[[rule]]
+name = "spring-diagnostics"
+action = "tarpit"
+paths = ["/actuator/heapdump", "/actuator/threaddump"]
+methods = ["GET", "HEAD"]
+category = "spring-diagnostic-discovery"
+status = 200
+content_type = "application/octet-stream"
+response = "JAVA PROFILE 1.0.2\n"
+
+[[rule]]
+name = "spring-jolokia"
+action = "tarpit"
+path_prefixes = ["/jolokia/"]
+category = "spring-admin-jolokia"
+status = 200
+content_type = "application/json; charset=utf-8"
+response = "{\"status\":200,\"request\":{\"type\":\"version\"},\"value\":{\"agent\":\"1.7.2\",\"protocol\":\"7.2\"}}"
+
+[[rule]]
+name = "spring-cloud-gateway-discovery"
+action = "deceive"
+paths = ["/actuator/gateway/routes", "/actuator/gateway/globalfilters"]
+methods = ["GET", "HEAD"]
+category = "spring-admin-discovery"
+status = 200
+content_type = "application/json; charset=utf-8"
+response = "[]"
+
+[[rule]]
+name = "spring-cloud-gateway-write"
+action = "tarpit"
+path_prefixes = ["/actuator/gateway/routes/", "/actuator/gateway/refresh"]
+methods = ["POST", "PUT", "PATCH", "DELETE"]
+category = "spring-rce-probe"
+status = 201
+content_type = "application/json; charset=utf-8"
+response = "{}"
