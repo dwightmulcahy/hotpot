@@ -1,0 +1,94 @@
+[[rule]]
+name = "fortinet-ssl-vpn"
+action = "tarpit"
+paths = ["/remote/login", "/remote/logincheck", "/remote/fgt_lang"]
+category = "appliance-admin-discovery"
+bait_id = "fortinet"
+bait_stage = "discovered"
+status = 200
+content_type = "text/html; charset=utf-8"
+response = "<html><head><title>FortiGate SSL VPN</title></head><body><h1>SSL VPN</h1></body></html>"
+
+[[rule]]
+name = "fortinet-api-admin"
+action = "tarpit"
+path_prefixes = ["/api/v2/cmdb/system/admin", "/api/v2/monitor/system/"]
+category = "appliance-admin-discovery"
+bait_id = "fortinet"
+bait_stage = "interacted"
+status = 401
+content_type = "application/json; charset=utf-8"
+response = "{\"status\":\"error\",\"http_status\":401}"
+
+[[rule]]
+name = "ivanti-pulse-vpn"
+action = "tarpit"
+path_prefixes = ["/dana-na/", "/dana/home/"]
+category = "appliance-admin-discovery"
+status = 200
+content_type = "text/html; charset=utf-8"
+response = "<html><head><title>Secure Access</title></head><body><h1>Sign In</h1></body></html>"
+
+[[rule]]
+name = "citrix-netscaler"
+action = "tarpit"
+paths = ["/vpn/index.html", "/logon/LogonPoint/index.html"]
+path_prefixes = ["/vpns/", "/netscaler/"]
+category = "appliance-admin-discovery"
+status = 200
+content_type = "text/html; charset=utf-8"
+response = "<html><head><title>Citrix Gateway</title></head><body><h1>Citrix Gateway</h1></body></html>"
+
+[[rule]]
+name = "f5-bigip-login"
+action = "tarpit"
+paths = ["/tmui/login.jsp", "/mgmt/shared/authn/login"]
+category = "appliance-admin-discovery"
+bait_id = "f5-bigip"
+bait_stage = "discovered"
+status = 200
+content_type = "text/html; charset=utf-8"
+response = "<html><head><title>BIG-IP</title></head><body><h1>Configuration Utility</h1></body></html>"
+
+[[rule]]
+name = "f5-bigip-command"
+action = "tarpit"
+paths = ["/mgmt/tm/util/bash", "/mgmt/tm/util/tmsh"]
+methods = ["POST", "PUT", "PATCH"]
+category = "appliance-rce-probe"
+bait_id = "f5-bigip"
+bait_stage = "exploit-attempt"
+status = 200
+content_type = "application/json; charset=utf-8"
+response = "{\"kind\":\"tm:util:bash:runstate\",\"command\":\"run\",\"utilCmdArgs\":\"\"}"
+
+[[rule]]
+name = "sonicwall-management"
+action = "tarpit"
+path_prefixes = ["/sonicui/", "/cgi-bin/sonicwall/"]
+category = "appliance-admin-discovery"
+status = 200
+content_type = "text/html; charset=utf-8"
+response = "<html><head><title>SonicWall</title></head><body><h1>Management</h1></body></html>"
+
+[[rule]]
+name = "paloalto-globalprotect"
+action = "tarpit"
+paths = ["/global-protect/login.esp", "/global-protect/getconfig.esp"]
+category = "appliance-admin-discovery"
+bait_id = "paloalto-globalprotect"
+bait_stage = "discovered"
+status = 200
+content_type = "text/html; charset=utf-8"
+response = "<html><head><title>GlobalProtect Portal</title></head><body><h1>GlobalProtect</h1></body></html>"
+
+[[rule]]
+name = "paloalto-router-probe"
+action = "tarpit"
+path_prefixes = ["/php/utils/router.php/"]
+category = "appliance-rce-probe"
+bait_id = "paloalto-globalprotect"
+bait_stage = "exploit-attempt"
+status = 404
+content_type = "text/plain; charset=utf-8"
+response = "Not Found"

@@ -98,6 +98,8 @@ class ProductionDeceptionMixin:
             path=request.path_qs,
             rule_name=rule.name,
             category=rule.category,
+            bait_id=rule.bait_id,
+            bait_stage=rule.bait_stage,
         )
         severity = min(
             5,
