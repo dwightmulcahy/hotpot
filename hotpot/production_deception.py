@@ -7,6 +7,7 @@ from typing import Any
 
 from aiohttp import web
 
+from .bot_intelligence import IPverseBotIntelligence
 from .intelligence import actor_fingerprint, classify, escalation_for
 from .store import AttackerState
 from .wordpress_deception import (
@@ -31,6 +32,18 @@ class ProductionDeceptionMixin:
         super().__init__(*args, **kwargs)
         self.wordpress_persona = WordPressPersona.load_or_create(self.settings.data_dir)
         self.deception_sessions = DeceptionSessions(timeout_seconds=900.0)
+        self.bot_intelligence = IPverseBotIntelligence(self.settings.data_dir)
+        self.stats["bot_verified"] = 0
+        self.stats["bot_claimed"] = 0
+        self.stats["bot_spoofed"] = 0
+
+    async def startup(self, app: web.Application) -> None:
+        await super().startup(app)
+        await self.bot_intelligence.start()
+
+    async def shutdown(self, app: web.Application) -> None:
+        await self.bot_intelligence.stop()
+        await super().shutdown(app)
 
     def _actor_fingerprint(self, request: web.Request, identity, classification) -> str:
         version = getattr(request, "version", None)
@@ -66,6 +79,7 @@ class ProductionDeceptionMixin:
             "journey_identity": "path-independent actor fingerprint",
             "request_identity": "path-specific behavioral fingerprint",
         }
+        payload["bot_intelligence"] = self.bot_intelligence.status()
         return web.json_response(payload, headers={"Cache-Control": "no-store"})
 
     async def deception(self, request: web.Request, rule) -> web.StreamResponse:
@@ -76,6 +90,7 @@ class ProductionDeceptionMixin:
         classification = classify(
             user_agent, rule.category, request.method, request.path_qs
         )
+        bot_observation = self.bot_intelligence.identify(client_ip, user_agent)
         actor_fp = self._actor_fingerprint(request, identity, classification)
         observation = self.deception_sessions.observe(
             actor_fingerprint=actor_fp,
@@ -86,7 +101,9 @@ class ProductionDeceptionMixin:
         )
         severity = min(
             5,
-            classification.severity + velocity_severity_bonus(observation),
+            classification.severity
+            + velocity_severity_bonus(observation)
+            + (1 if bot_observation.spoofed else 0),
         )
         response_text = (
             self.wordpress_persona.render(rule.name, rule.response)
@@ -184,6 +201,7 @@ class ProductionDeceptionMixin:
                     "content_type": request.headers.get("Content-Type", ""),
                     "content_length": request.content_length,
                     "query_parameter_names": sorted(request.query.keys()),
+                    **bot_observation.event_fields(),
                 }
                 if suppressed_before:
                     event["suppressed_before"] = suppressed_before
@@ -232,6 +250,7 @@ class ProductionDeceptionMixin:
                 "bait_stage": observation["bait_stage"],
                 "bait_followed": observation["bait_followed"],
                 "tarpit_style": None,
+                **bot_observation.event_fields(),
             }
             self.stats["telemetry_errors"] += 1
             escalation = type(
@@ -247,6 +266,12 @@ class ProductionDeceptionMixin:
         self.stats[f"escalation:{event.get('escalation_level', 1)}"] += 1
         if observation["bait_stage"]:
             self.stats[f"bait:{observation['bait_stage']}"] += 1
+        if bot_observation.claimed_identity:
+            self.stats["bot_claimed"] += 1
+        if bot_observation.verified:
+            self.stats["bot_verified"] += 1
+        if bot_observation.spoofed:
+            self.stats["bot_spoofed"] += 1
         if identity.source_type == "cloudflare-worker":
             self.stats["cloudflare_worker_events"] += 1
         if persist_event:
