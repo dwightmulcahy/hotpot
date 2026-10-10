@@ -4,6 +4,8 @@ action = "deceive"
 paths = ["/_ping"]
 methods = ["GET", "HEAD"]
 category = "container-admin-discovery"
+bait_id = "docker-api"
+bait_stage = "discovered"
 status = 200
 content_type = "text/plain; charset=utf-8"
 response = "OK"
@@ -14,6 +16,8 @@ action = "tarpit"
 regex = ["^/(v[0-9]+\\.[0-9]+/)?(containers/json|images/json|networks|volumes|info)(/|$)"]
 methods = ["GET", "HEAD"]
 category = "container-admin-discovery"
+bait_id = "docker-api"
+bait_stage = "interacted"
 status = 200
 content_type = "application/json; charset=utf-8"
 response = "[]"
@@ -24,6 +28,8 @@ action = "tarpit"
 regex = ["^/(v[0-9]+\\.[0-9]+/)?containers/[^/]+/(exec|start|stop|kill|archive)(/|$)"]
 methods = ["POST", "PUT", "PATCH", "DELETE"]
 category = "container-rce-probe"
+bait_id = "docker-api"
+bait_stage = "exploit-attempt"
 status = 201
 content_type = "application/json; charset=utf-8"
 response = "{\"Id\":\"8f4d5a3c9b2e\"}"
@@ -38,6 +44,8 @@ paths = [
 ]
 methods = ["GET", "HEAD"]
 category = "container-admin-discovery"
+bait_id = "kubernetes-api"
+bait_stage = "discovered"
 status = 200
 content_type = "application/json; charset=utf-8"
 response = "{\"kind\":\"List\",\"apiVersion\":\"v1\",\"metadata\":{},\"items\":[]}"
@@ -47,6 +55,8 @@ name = "kubernetes-secrets"
 action = "tarpit"
 regex = ["^/api/v1/namespaces/[^/]+/(secrets|serviceaccounts)(/|$)"]
 category = "credential-discovery"
+bait_id = "kubernetes-api"
+bait_stage = "interacted"
 status = 200
 content_type = "application/json; charset=utf-8"
 response = "{\"kind\":\"SecretList\",\"apiVersion\":\"v1\",\"metadata\":{},\"items\":[]}"
@@ -56,6 +66,8 @@ name = "kubernetes-pod-exec"
 action = "tarpit"
 regex = ["^/api/v1/namespaces/[^/]+/pods/[^/]+/(exec|attach|portforward)(/|$)"]
 category = "container-rce-probe"
+bait_id = "kubernetes-api"
+bait_stage = "exploit-attempt"
 status = 400
 content_type = "application/json; charset=utf-8"
 response = "{\"kind\":\"Status\",\"apiVersion\":\"v1\",\"status\":\"Failure\",\"reason\":\"BadRequest\"}"

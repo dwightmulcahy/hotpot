@@ -13,6 +13,8 @@ action = "tarpit"
 paths = ["/_cluster/health", "/_cluster/settings", "/_cat/indices", "/_cat/nodes", "/_nodes"]
 methods = ["GET", "HEAD"]
 category = "observability-admin-discovery"
+bait_id = "elasticsearch"
+bait_stage = "discovered"
 status = 200
 content_type = "application/json; charset=utf-8"
 response = "{\"cluster_name\":\"prod-search\",\"status\":\"yellow\",\"timed_out\":false,\"number_of_nodes\":1,\"number_of_data_nodes\":1}"
@@ -23,6 +25,8 @@ action = "tarpit"
 regex = ["^/[^/]+/_search$", "^/_search$"]
 methods = ["GET", "POST"]
 category = "observability-data-discovery"
+bait_id = "elasticsearch"
+bait_stage = "interacted"
 status = 200
 content_type = "application/json; charset=utf-8"
 response = "{\"took\":2,\"timed_out\":false,\"hits\":{\"total\":{\"value\":0,\"relation\":\"eq\"},\"hits\":[]}}"
@@ -33,6 +37,8 @@ action = "tarpit"
 regex = ["^/_bulk$", "^/[^/]+/_doc(/|$)"]
 methods = ["POST", "PUT", "PATCH", "DELETE"]
 category = "observability-write-probe"
+bait_id = "elasticsearch"
+bait_stage = "exploit-attempt"
 status = 200
 content_type = "application/json; charset=utf-8"
 response = "{\"acknowledged\":true}"

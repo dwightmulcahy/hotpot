@@ -4,6 +4,8 @@ action = "deceive"
 paths = ["/actuator", "/actuator/"]
 methods = ["GET", "HEAD"]
 category = "spring-admin-discovery"
+bait_id = "spring-actuator"
+bait_stage = "discovered"
 status = 200
 content_type = "application/json; charset=utf-8"
 response = "{\"_links\":{\"self\":{\"href\":\"/actuator\"},\"health\":{\"href\":\"/actuator/health\"},\"info\":{\"href\":\"/actuator/info\"},\"env\":{\"href\":\"/actuator/env\"},\"mappings\":{\"href\":\"/actuator/mappings\"}}}"
@@ -14,6 +16,8 @@ action = "deceive"
 paths = ["/actuator/health", "/actuator/info"]
 methods = ["GET", "HEAD"]
 category = "spring-admin-discovery"
+bait_id = "spring-actuator"
+bait_stage = "interacted"
 status = 200
 content_type = "application/json; charset=utf-8"
 response = "{\"status\":\"UP\"}"
@@ -32,6 +36,8 @@ paths = [
 ]
 methods = ["GET", "HEAD"]
 category = "spring-env-discovery"
+bait_id = "spring-actuator"
+bait_stage = "interacted"
 status = 200
 content_type = "application/json; charset=utf-8"
 response = "{\"activeProfiles\":[\"prod\"],\"propertySources\":[{\"name\":\"systemEnvironment\",\"properties\":{\"SPRING_PROFILES_ACTIVE\":{\"value\":\"prod\"}}}]}"
@@ -42,6 +48,8 @@ action = "tarpit"
 paths = ["/actuator/heapdump", "/actuator/threaddump"]
 methods = ["GET", "HEAD"]
 category = "spring-diagnostic-discovery"
+bait_id = "spring-actuator"
+bait_stage = "interacted"
 status = 200
 content_type = "application/octet-stream"
 response = "JAVA PROFILE 1.0.2\n"
@@ -61,6 +69,8 @@ action = "deceive"
 paths = ["/actuator/gateway/routes", "/actuator/gateway/globalfilters"]
 methods = ["GET", "HEAD"]
 category = "spring-admin-discovery"
+bait_id = "spring-cloud-gateway"
+bait_stage = "discovered"
 status = 200
 content_type = "application/json; charset=utf-8"
 response = "[]"
@@ -71,6 +81,8 @@ action = "tarpit"
 path_prefixes = ["/actuator/gateway/routes/", "/actuator/gateway/refresh"]
 methods = ["POST", "PUT", "PATCH", "DELETE"]
 category = "spring-rce-probe"
+bait_id = "spring-cloud-gateway"
+bait_stage = "exploit-attempt"
 status = 201
 content_type = "application/json; charset=utf-8"
 response = "{}"

@@ -4,6 +4,8 @@ action = "deceive"
 paths = ["/jenkins/", "/jenkins/login", "/jenkins/api/json", "/computer/api/json"]
 methods = ["GET", "HEAD"]
 category = "devops-admin-discovery"
+bait_id = "jenkins"
+bait_stage = "discovered"
 status = 200
 content_type = "application/json; charset=utf-8"
 response = "{\"mode\":\"NORMAL\",\"nodeDescription\":\"the master Jenkins node\",\"numExecutors\":2}"
@@ -13,6 +15,8 @@ name = "jenkins-script-console"
 action = "tarpit"
 paths = ["/script", "/scriptText", "/jenkins/script", "/jenkins/scriptText"]
 category = "jenkins-rce-probe"
+bait_id = "jenkins"
+bait_stage = "exploit-attempt"
 status = 200
 content_type = "text/html; charset=utf-8"
 response = "<html><head><title>Script Console [Jenkins]</title></head><body><h1>Script Console</h1></body></html>"
@@ -22,6 +26,8 @@ name = "jenkins-credentials"
 action = "tarpit"
 path_prefixes = ["/credentials/", "/jenkins/credentials/"]
 category = "credential-discovery"
+bait_id = "jenkins"
+bait_stage = "interacted"
 status = 403
 content_type = "text/plain; charset=utf-8"
 response = "Forbidden"

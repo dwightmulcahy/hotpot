@@ -3,6 +3,8 @@ name = "joomla-admin"
 action = "tarpit"
 paths = ["/administrator/", "/administrator/index.php", "/api/index.php/v1/"]
 category = "cms-admin-discovery"
+bait_id = "joomla"
+bait_stage = "discovered"
 status = 200
 content_type = "text/html; charset=utf-8"
 response = "<html><head><title>Joomla! Administrator</title></head><body><h1>Administrator Login</h1></body></html>"
@@ -12,6 +14,8 @@ name = "joomla-component-probe"
 action = "tarpit"
 regex = ["^/index\\.php\\?option=com_[a-z0-9_-]+"]
 category = "cms-admin-discovery"
+bait_id = "joomla"
+bait_stage = "interacted"
 status = 200
 content_type = "text/html; charset=utf-8"
 response = "<html><body>Joomla!</body></html>"
@@ -21,6 +25,8 @@ name = "drupal-install"
 action = "deceive"
 paths = ["/core/install.php", "/install.php", "/CHANGELOG.txt"]
 category = "cms-admin-discovery"
+bait_id = "drupal"
+bait_stage = "discovered"
 status = 200
 content_type = "text/plain; charset=utf-8"
 response = "Drupal 10.2.7, 2024-04-05\n"
@@ -30,6 +36,8 @@ name = "drupal-login"
 action = "tarpit"
 paths = ["/user/login", "/user/password"]
 category = "cms-admin-discovery"
+bait_id = "drupal"
+bait_stage = "interacted"
 status = 200
 content_type = "text/html; charset=utf-8"
 response = "<html><head><title>Log in | Drupal</title></head><body><form><input name=\"name\"><input name=\"pass\" type=\"password\"></form></body></html>"
@@ -39,6 +47,8 @@ name = "drupal-settings"
 action = "tarpit"
 paths = ["/sites/default/settings.php", "/sites/default/services.yml"]
 category = "cms-config-discovery"
+bait_id = "drupal"
+bait_stage = "interacted"
 status = 403
 content_type = "text/plain; charset=utf-8"
 response = "Forbidden"
@@ -49,6 +59,8 @@ action = "deceive"
 paths = ["/rest/V1/store/storeConfigs", "/rest/all/V1/store/storeConfigs"]
 methods = ["GET", "HEAD"]
 category = "cms-admin-discovery"
+bait_id = "magento"
+bait_stage = "discovered"
 status = 200
 content_type = "application/json; charset=utf-8"
 response = "[{\"id\":1,\"code\":\"default\",\"website_id\":1,\"locale\":\"en_US\",\"base_currency_code\":\"USD\"}]"
@@ -58,6 +70,8 @@ name = "magento-env"
 action = "tarpit"
 paths = ["/app/etc/env.php", "/app/etc/config.php", "/pub/errors/local.xml"]
 category = "cms-env-discovery"
+bait_id = "magento"
+bait_stage = "interacted"
 status = 403
 content_type = "text/plain; charset=utf-8"
 response = "Forbidden"
@@ -67,6 +81,8 @@ name = "magento-legacy-downloader"
 action = "tarpit"
 path_prefixes = ["/downloader/"]
 category = "cms-admin-discovery"
+bait_id = "magento"
+bait_stage = "interacted"
 status = 200
 content_type = "text/html; charset=utf-8"
 response = "<html><head><title>Magento Downloader</title></head><body>Magento Connect Manager</body></html>"

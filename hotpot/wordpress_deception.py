@@ -146,12 +146,15 @@ class DeceptionSessions:
         request_fingerprint: str | None = None,
         ip: str | None = None,
         fingerprint: str | None = None,
+        bait_id: str | None = None,
+        bait_stage: str | None = None,
     ) -> dict[str, Any]:
         """Observe one deceptive request and return journey/velocity metadata.
 
         ``actor_fingerprint`` is the preferred path-independent key. ``ip`` and
-        ``fingerprint`` remain accepted for compatibility with older callers, but new
-        production code should always provide the actor fingerprint explicitly.
+        ``fingerprint`` remain accepted for compatibility with older callers. Profiles
+        may explicitly provide ``bait_id`` and ``bait_stage`` so non-WordPress rules
+        participate in the same journey correlation as the legacy WordPress lures.
         """
         now = time.monotonic()
         request_fp = request_fingerprint or fingerprint or ""
@@ -174,18 +177,32 @@ class DeceptionSessions:
         hits_60s = len(state.recent)
         unique_paths_60s = len({p for _, p in state.recent})
 
-        bait_id = self._bait_id(rule_name)
-        bait_stage = None
+        resolved_bait_id = bait_id or self._bait_id(rule_name)
+        resolved_stage = None
         bait_followed = False
-        if category == "wordpress-vulnerability-bait" and bait_id:
-            state.discovered_baits.add(bait_id)
-            bait_stage = "discovered"
-        elif category == "wordpress-bait-followup" and bait_id:
-            bait_followed = bait_id in state.discovered_baits
-            bait_stage = "exploit-attempt" if bait_followed else "interacted"
+
+        if bait_stage and resolved_bait_id:
+            if bait_stage == "discovered":
+                state.discovered_baits.add(resolved_bait_id)
+                resolved_stage = "discovered"
+            elif bait_stage == "interacted":
+                bait_followed = resolved_bait_id in state.discovered_baits
+                resolved_stage = "interacted"
+            elif bait_stage == "exploit-attempt":
+                bait_followed = resolved_bait_id in state.discovered_baits
+                resolved_stage = "exploit-attempt" if bait_followed else "interacted"
+            elif bait_stage == "canary-followed":
+                bait_followed = resolved_bait_id in state.discovered_baits
+                resolved_stage = "canary-followed" if bait_followed else "interacted"
+        elif category == "wordpress-vulnerability-bait" and resolved_bait_id:
+            state.discovered_baits.add(resolved_bait_id)
+            resolved_stage = "discovered"
+        elif category == "wordpress-bait-followup" and resolved_bait_id:
+            bait_followed = resolved_bait_id in state.discovered_baits
+            resolved_stage = "exploit-attempt" if bait_followed else "interacted"
         elif rule_name == "wordpress-canary":
-            bait_id = "wordpress-canary"
-            bait_stage = "canary-followed"
+            resolved_bait_id = "wordpress-canary"
+            resolved_stage = "canary-followed"
             bait_followed = True
 
         return {
@@ -194,8 +211,8 @@ class DeceptionSessions:
             "hits_10s": hits_10s,
             "hits_60s": hits_60s,
             "unique_paths_60s": unique_paths_60s,
-            "bait_id": bait_id,
-            "bait_stage": bait_stage,
+            "bait_id": resolved_bait_id,
+            "bait_stage": resolved_stage,
             "bait_followed": bait_followed,
         }
 
