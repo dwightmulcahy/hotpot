@@ -1,0 +1,67 @@
+[[rule]]
+name = "grafana-discovery"
+action = "deceive"
+path_prefixes = ["/grafana/"]
+category = "observability-admin-discovery"
+status = 200
+content_type = "text/html; charset=utf-8"
+response = "<html><head><title>Grafana</title></head><body><div id=\"reactRoot\"></div></body></html>"
+
+[[rule]]
+name = "elasticsearch-cluster"
+action = "tarpit"
+paths = ["/_cluster/health", "/_cluster/settings", "/_cat/indices", "/_cat/nodes", "/_nodes"]
+methods = ["GET", "HEAD"]
+category = "observability-admin-discovery"
+status = 200
+content_type = "application/json; charset=utf-8"
+response = "{\"cluster_name\":\"prod-search\",\"status\":\"yellow\",\"timed_out\":false,\"number_of_nodes\":1,\"number_of_data_nodes\":1}"
+
+[[rule]]
+name = "elasticsearch-search"
+action = "tarpit"
+regex = ["^/[^/]+/_search$", "^/_search$"]
+methods = ["GET", "POST"]
+category = "observability-data-discovery"
+status = 200
+content_type = "application/json; charset=utf-8"
+response = "{\"took\":2,\"timed_out\":false,\"hits\":{\"total\":{\"value\":0,\"relation\":\"eq\"},\"hits\":[]}}"
+
+[[rule]]
+name = "elasticsearch-write"
+action = "tarpit"
+regex = ["^/_bulk$", "^/[^/]+/_doc(/|$)"]
+methods = ["POST", "PUT", "PATCH", "DELETE"]
+category = "observability-rce-probe"
+status = 200
+content_type = "application/json; charset=utf-8"
+response = "{\"acknowledged\":true}"
+
+[[rule]]
+name = "prometheus-discovery"
+action = "deceive"
+paths = ["/-/ready", "/api/v1/status/config", "/api/v1/targets", "/api/v1/label/__name__/values"]
+methods = ["GET", "HEAD"]
+category = "observability-admin-discovery"
+status = 200
+content_type = "application/json; charset=utf-8"
+response = "{\"status\":\"success\",\"data\":{}}"
+
+[[rule]]
+name = "kibana-discovery"
+action = "deceive"
+paths = ["/app/kibana", "/api/status"]
+category = "observability-admin-discovery"
+status = 200
+content_type = "application/json; charset=utf-8"
+response = "{\"name\":\"kibana\",\"status\":{\"overall\":{\"level\":\"available\"}}}"
+
+[[rule]]
+name = "jaeger-discovery"
+action = "deceive"
+paths = ["/api/services", "/api/traces"]
+methods = ["GET", "HEAD"]
+category = "observability-data-discovery"
+status = 200
+content_type = "application/json; charset=utf-8"
+response = "{\"data\":[],\"total\":0,\"limit\":0,\"offset\":0,\"errors\":null}"
