@@ -208,8 +208,8 @@ services:
 # public hostnames point to the Hotpot listener ports rather than directly to
 # the applications, for example:
 #
-#   www.example-one.com  -> http://localhost:18088
-#   www.example-two.com  -> http://localhost:12120
-#   password.example.com -> http://localhost:18089
+#   www.example-one.com          -> http://localhost:18088
+#   www.example-two.com          -> http://localhost:12120
+#   passwordlab.bytemeloser.com  -> http://localhost:18089
 #
 # Hotpot then forwards normal traffic to the existing upstream ports above.
