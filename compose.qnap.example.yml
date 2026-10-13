@@ -210,6 +210,6 @@ services:
 #
 #   www.example-one.com          -> http://localhost:18088
 #   www.example-two.com          -> http://localhost:12120
-#   passwordlab.bytemeloser.com  -> http://localhost:18089
+#   passwordlab.dwights.dev      -> http://localhost:18089
 #
 # Hotpot then forwards normal traffic to the existing upstream ports above.
