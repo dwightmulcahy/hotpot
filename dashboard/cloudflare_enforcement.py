@@ -43,8 +43,18 @@ class CloudflareEnforcer(IPAccessMixin, _LegacyEnforcer):
 
     @staticmethod
     def _stored_rule(
-        *, zone_id, ruleset_id, rule_id, action, expression, hosts, ref, reused,
-        provider=CUSTOM_WAF_PROVIDER, target_value=None, expires_at=None,
+        *,
+        zone_id,
+        ruleset_id,
+        rule_id,
+        action,
+        expression,
+        hosts,
+        ref,
+        reused,
+        provider=CUSTOM_WAF_PROVIDER,
+        target_value=None,
+        expires_at=None,
     ):
         return {
             "provider": provider,
@@ -67,7 +77,9 @@ class CloudflareEnforcer(IPAccessMixin, _LegacyEnforcer):
 
     async def apply(self, recommendation):
         if not self.config.configured:
-            raise CloudflareEnforcementError("Cloudflare enforcement is not fully configured")
+            raise CloudflareEnforcementError(
+                "Cloudflare enforcement is not fully configured"
+            )
         zone_hosts = self._targets_for_recommendation(recommendation)
         if self._uses_ip_access_rule(recommendation):
             return await self._apply_ip_access(recommendation, zone_hosts)
@@ -82,12 +94,39 @@ class CloudflareEnforcer(IPAccessMixin, _LegacyEnforcer):
     async def reconcile(self, recommendations):
         custom, access = [], []
         for recommendation in recommendations:
-            rules = [r for r in recommendation.get("enforcement_rules") or [] if isinstance(r, dict)]
-            if any(str(r.get("provider") or CUSTOM_WAF_PROVIDER) == IP_ACCESS_PROVIDER for r in rules):
+            rules = [
+                rule
+                for rule in recommendation.get("enforcement_rules") or []
+                if isinstance(rule, dict)
+            ]
+            if any(
+                str(rule.get("provider") or CUSTOM_WAF_PROVIDER)
+                == IP_ACCESS_PROVIDER
+                for rule in rules
+            ):
                 access.append(recommendation)
             else:
                 custom.append(recommendation)
-        base = await super().reconcile(custom)
+
+        if custom:
+            base = await super().reconcile(custom)
+        else:
+            base = {
+                "checked_at": datetime.now(timezone.utc).isoformat(),
+                "status": "healthy",
+                "recommendations": [],
+                "counts": {
+                    "healthy": 0,
+                    "drifted": 0,
+                    "missing": 0,
+                    "error": 0,
+                },
+                "orphans": [],
+                "orphaned": 0,
+                "zone_errors": [],
+                "zones_checked": 0,
+            }
+
         results = list(base.get("recommendations") or [])
         errors = list(base.get("zone_errors") or [])
         zones = set()
@@ -99,27 +138,58 @@ class CloudflareEnforcer(IPAccessMixin, _LegacyEnforcer):
                 "rules": [],
             }
             for expected in recommendation.get("enforcement_rules") or []:
-                if not isinstance(expected, dict) or str(expected.get("provider") or CUSTOM_WAF_PROVIDER) != IP_ACCESS_PROVIDER:
+                if (
+                    not isinstance(expected, dict)
+                    or str(expected.get("provider") or CUSTOM_WAF_PROVIDER)
+                    != IP_ACCESS_PROVIDER
+                ):
                     continue
                 zone_id = str(expected.get("zone_id") or "")
                 zones.add(zone_id)
                 try:
-                    observed = await self.inspect_access_rule(zone_id, str(expected.get("rule_id") or ""))
+                    observed = await self.inspect_access_rule(
+                        zone_id, str(expected.get("rule_id") or "")
+                    )
                 except Exception as exc:
                     result["status"] = "error"
                     detail = f"{type(exc).__name__}: {exc}"
-                    errors.append({"zone_id": zone_id, "provider": IP_ACCESS_PROVIDER, "error": detail})
-                    result["rules"].append({"provider": IP_ACCESS_PROVIDER, "zone_id": zone_id, "status": "error", "detail": detail})
+                    errors.append(
+                        {
+                            "zone_id": zone_id,
+                            "provider": IP_ACCESS_PROVIDER,
+                            "error": detail,
+                        }
+                    )
+                    result["rules"].append(
+                        {
+                            "provider": IP_ACCESS_PROVIDER,
+                            "zone_id": zone_id,
+                            "status": "error",
+                            "detail": detail,
+                        }
+                    )
                     continue
                 if observed is None:
                     result["status"] = "missing"
-                    result["rules"].append({"provider": IP_ACCESS_PROVIDER, "zone_id": zone_id, "status": "missing", "detail": "expected Hotpot IP Access rule was not found"})
+                    result["rules"].append(
+                        {
+                            "provider": IP_ACCESS_PROVIDER,
+                            "zone_id": zone_id,
+                            "status": "missing",
+                            "detail": "expected Hotpot IP Access rule was not found",
+                        }
+                    )
                     continue
                 differences = []
                 if str(observed.get("mode") or "") != "block":
                     differences.append("mode changed")
-                current_target = str((observed.get("configuration") or {}).get("value") or "")
-                if str(expected.get("target_value") or "") and current_target != str(expected.get("target_value") or ""):
+                current_target = str(
+                    (observed.get("configuration") or {}).get("value") or ""
+                )
+                if (
+                    str(expected.get("target_value") or "")
+                    and current_target != str(expected.get("target_value") or "")
+                ):
                     differences.append("target changed")
                 notes = _parse_access_notes(observed.get("notes"))
                 if not notes:
@@ -131,10 +201,29 @@ class CloudflareEnforcer(IPAccessMixin, _LegacyEnforcer):
                 status = "drifted" if differences else "healthy"
                 if differences and result["status"] == "healthy":
                     result["status"] = "drifted"
-                result["rules"].append({"provider": IP_ACCESS_PROVIDER, "zone_id": zone_id, "status": status, "detail": "; ".join(differences) if differences else "matches persisted Hotpot IP Access rule"})
+                result["rules"].append(
+                    {
+                        "provider": IP_ACCESS_PROVIDER,
+                        "zone_id": zone_id,
+                        "status": status,
+                        "detail": "; ".join(differences)
+                        if differences
+                        else "matches persisted Hotpot IP Access rule",
+                    }
+                )
             results.append(result)
-        counts = {status: sum(1 for row in results if row.get("status") == status) for status in ("healthy", "drifted", "missing", "error")}
-        overall = "error" if errors or counts["error"] else "drifted" if counts["missing"] or counts["drifted"] or base.get("orphans") else "healthy"
+
+        counts = {
+            status: sum(1 for row in results if row.get("status") == status)
+            for status in ("healthy", "drifted", "missing", "error")
+        }
+        overall = (
+            "error"
+            if errors or counts["error"]
+            else "drifted"
+            if counts["missing"] or counts["drifted"] or base.get("orphans")
+            else "healthy"
+        )
         return {
             **base,
             "status": overall,
