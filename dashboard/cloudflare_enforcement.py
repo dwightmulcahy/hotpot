@@ -5,12 +5,16 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlencode
 
 from aiohttp import ClientSession
 
 
 CLOUDFLARE_API_BASE = "https://api.cloudflare.com/client/v4"
 CUSTOM_RULE_PHASE = "http_request_firewall_custom"
+IP_ACCESS_PROVIDER = "ip_access"
+CUSTOM_WAF_PROVIDER = "custom_waf"
+HOT_POT_ACCESS_NOTES_PREFIX = "hotpot-long-block"
 
 
 class CloudflareEnforcementError(RuntimeError):
@@ -37,8 +41,6 @@ class CloudflareConfig:
 
     @property
     def can_remove(self) -> bool:
-        # Removal and reconciliation use rule metadata persisted at apply time and
-        # only need API auth.
         return bool(self.api_token)
 
     def public_status(self) -> dict[str, Any]:
@@ -49,6 +51,8 @@ class CloudflareConfig:
             "zones": len({target.zone_id for target in self.targets.values()}),
             "provider": "Cloudflare Rulesets API",
             "phase": CUSTOM_RULE_PHASE,
+            "long_block_provider": "Cloudflare zone IP Access Rules",
+            "long_blocks_consume_custom_rule_slots": False,
             "token_configured": bool(self.api_token),
             "automatic_enforcement": False,
             "approval_required": True,
@@ -99,8 +103,6 @@ def parse_cloudflare_targets(raw: str) -> dict[str, CloudflareTarget]:
 
 
 def _quote_wirefilter_string(value: str) -> str:
-    # Cloudflare wirefilter string escaping is compatible with JSON double-quoted
-    # strings for the hostname/zone values Hotpot emits here.
     return json.dumps(value, ensure_ascii=True)
 
 
@@ -134,6 +136,43 @@ def build_expression(
         for host in sorted(set(hosts))
     )
     return f"({actor}) and ({host_expr})"
+
+
+def _parse_iso(value: str | None) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _access_notes(expires_at: str, target_value: str) -> str:
+    return f"{HOT_POT_ACCESS_NOTES_PREFIX};expires={expires_at};target={target_value}"
+
+
+def _parse_access_notes(notes: str | None) -> dict[str, str]:
+    raw = str(notes or "")
+    if not raw.startswith(HOT_POT_ACCESS_NOTES_PREFIX):
+        return {}
+    result: dict[str, str] = {}
+    for part in raw.split(";")[1:]:
+        key, sep, value = part.partition("=")
+        if sep and key:
+            result[key] = value
+    return result
+
+
+def _access_target(target_value: str) -> tuple[str, str]:
+    try:
+        address = ipaddress.ip_address(target_value)
+    except ValueError as exc:
+        raise CloudflareEnforcementError("invalid IP enforcement target") from exc
+    return ("ip" if address.version == 4 else "ip6", address.compressed)
 
 
 class CloudflareEnforcer:
@@ -184,7 +223,6 @@ class CloudflareEnforcer:
 
     async def inspect_zone(self, zone_id: str) -> dict[str, Any]:
         """Read the custom-WAF entrypoint without creating or changing anything."""
-
         status, data = await self._request(
             "GET",
             f"/zones/{zone_id}/rulesets/phases/{CUSTOM_RULE_PHASE}/entrypoint",
@@ -211,6 +249,51 @@ class CloudflareEnforcer:
                 rule for rule in result.get("rules") or [] if isinstance(rule, dict)
             ],
         }
+
+    async def inspect_access_rule(
+        self, zone_id: str, rule_id: str
+    ) -> dict[str, Any] | None:
+        status, data = await self._request(
+            "GET",
+            f"/zones/{zone_id}/firewall/access_rules/rules/{rule_id}",
+            allow_404=True,
+        )
+        if status == 404:
+            return None
+        result = (data or {}).get("result")
+        return result if isinstance(result, dict) else None
+
+    async def _find_hotpot_access_rule(
+        self, zone_id: str, target_value: str
+    ) -> dict[str, Any] | None:
+        access_target, normalized = _access_target(target_value)
+        query = urlencode(
+            {
+                "configuration.target": access_target,
+                "configuration.value": normalized,
+                "mode": "block",
+                "match": "all",
+                "per_page": "50",
+            }
+        )
+        _, data = await self._request(
+            "GET",
+            f"/zones/{zone_id}/firewall/access_rules/rules?{query}",
+        )
+        for item in (data or {}).get("result") or []:
+            if not isinstance(item, dict):
+                continue
+            configuration = item.get("configuration") or {}
+            if str(configuration.get("value") or "") != normalized:
+                continue
+            if str(item.get("mode") or "") != "block":
+                continue
+            if not str(item.get("notes") or "").startswith(
+                HOT_POT_ACCESS_NOTES_PREFIX
+            ):
+                continue
+            return item
+        return None
 
     async def _entrypoint_ruleset(
         self, zone_id: str
@@ -243,12 +326,16 @@ class CloudflareEnforcer:
     def _rule_action(recommendation_action: str) -> str:
         if recommendation_action == "recommend_challenge":
             return "managed_challenge"
-        if recommendation_action in {
-            "recommend_block",
-            "recommend_long_block",
-        }:
+        if recommendation_action in {"recommend_block", "recommend_long_block"}:
             return "block"
         raise CloudflareEnforcementError("recommendation is not enforceable")
+
+    @staticmethod
+    def _uses_ip_access_rule(recommendation: dict[str, Any]) -> bool:
+        return (
+            str(recommendation.get("action") or "") == "recommend_long_block"
+            and str(recommendation.get("target_type") or "") == "ip"
+        )
 
     def _targets_for_recommendation(
         self, recommendation: dict[str, Any]
@@ -270,7 +357,7 @@ class CloudflareEnforcer:
                 for instance_id in instance_ids
                 if instance_id not in self.config.targets
             }
-        )
+         )
         if missing:
             raise CloudflareEnforcementError(
                 "missing Cloudflare target mapping for: " + ", ".join(missing)
@@ -295,8 +382,12 @@ class CloudflareEnforcer:
         hosts: tuple[str, ...],
         ref: str,
         reused: bool,
+        provider: str = CUSTOM_WAF_PROVIDER,
+        target_value: str | None = None,
+        expires_at: str | None = None,
     ) -> dict[str, Any]:
         return {
+            "provider": provider,
             "zone_id": zone_id,
             "ruleset_id": ruleset_id,
             "rule_id": rule_id,
@@ -304,19 +395,127 @@ class CloudflareEnforcer:
             "expression": expression,
             "hosts": list(hosts),
             "ref": ref,
+            "target_value": target_value,
+            "expires_at": expires_at,
+            "zone_wide": provider == IP_ACCESS_PROVIDER,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "reused": reused,
         }
 
-    async def apply(self, recommendation: dict[str, Any]) -> list[dict[str, Any]]:
-        if not self.config.configured:
-            raise CloudflareEnforcementError(
-                "Cloudflare enforcement is not fully configured"
-            )
-
-        recommendation_id = str(
-            recommendation.get("recommendation_id") or ""
+    async def _apply_ip_access_long_block(
+        self,
+        recommendation: dict[str, Any],
+        zone_hosts: dict[str, tuple[str, ...]],
+    ) -> list[dict[str, Any]]:
+        target_value = str(recommendation.get("target_value") or "")
+        access_target, normalized = _access_target(target_value)
+        expires_at = str(
+            recommendation.get("enforcement_expires_at")
+            or recommendation.get("expires_at")
+            or ""
         )
+        recommendation_id = str(recommendation.get("recommendation_id") or "")
+        stored: list[dict[str, Any]] = []
+        newly_created: list[dict[str, Any]] = []
+
+        try:
+            for zone_id, hosts in zone_hosts.items():
+                existing = await self._find_hotpot_access_rule(zone_id, normalized)
+                if existing is not None:
+                    rule_id = str(existing.get("id") or "")
+                    if not rule_id:
+                        raise CloudflareEnforcementError(
+                            "existing IP Access rule omitted rule id"
+                        )
+                    notes = _parse_access_notes(existing.get("notes"))
+                    current_expiry = _parse_iso(notes.get("expires"))
+                    requested_expiry = _parse_iso(expires_at)
+                    effective_expiry = expires_at
+                    if current_expiry is not None and (
+                        requested_expiry is None or current_expiry > requested_expiry
+                    ):
+                        effective_expiry = current_expiry.isoformat()
+                    elif requested_expiry is not None and (
+                        current_expiry is None or requested_expiry > current_expiry
+                    ):
+                        effective_expiry = requested_expiry.isoformat()
+                        await self._request(
+                            "PATCH",
+                            f"/zones/{zone_id}/firewall/access_rules/rules/{rule_id}",
+                            payload={
+                                "configuration": {
+                                    "target": access_target,
+                                    "value": normalized,
+                                },
+                                "mode": "block",
+                                "notes": _access_notes(effective_expiry, normalized),
+                            },
+                          )
+                    stored.append(
+                        self._stored_rule(
+                            zone_id=zone_id,
+                            ruleset_id="",
+                            rule_id=rule_id,
+                            action="block",
+                            expression=f"ip.src eq {normalized}",
+                            hosts=hosts,
+                            ref=f"hotpot_ip_{recommendation_id[:16]}_{zone_id[:8]}",
+                            reused=True,
+                            provider=IP_ACCESS_PROVIDER,
+                            target_value=normalized,
+                            expires_at=expires_at,
+                        )
+                    )
+                    continue
+
+                  _, response = await self._request(
+                    "POST",
+                    f"/zones/{zone_id}/firewall/access_rules/rules",
+                    payload={
+                        "configuration": {
+                            "target": access_target,
+                            "value": normalized,
+                        },
+                        "mode": "block",
+                        "notes": _access_notes(expires_at, normalized),
+                    },
+                )
+                result = (response or {}).get("result") or {}
+                rule_id = str(result.get("id") or "")
+                if not rule_id:
+                    raise CloudflareEnforcementError(
+                        "Cloudflare IP Access rule creation omitted the new rule id"
+                    )
+                item = self._stored_rule(
+                    zone_id=zone_id,
+                    ruleset_id="",
+                    rule_id=rule_id,
+                    action="block",
+                    expression=f"ip.src eq {normalized}",
+                    hosts=hosts,
+                    ref=f"hotpot_ip_{recommendation_id[:16]}_{zone_id[:8]}",
+                    reused=False,
+                    provider=IP_ACCESS_PROVIDER,
+                    target_value=normalized,
+                    expires_at=expires_at,
+                 )
+                stored.append(item)
+                newly_created.append(item)
+            return stored
+        except Exception:
+            for rule in reversed(newly_created):
+                try:
+                    await self.remove_rule(rule)
+                except Exception:
+                    pass
+            raise
+
+    async def _apply_custom_waf(
+        self,
+        recommendation: dict[str, Any],
+        zone_hosts: dict[str, tuple[str, ...]],
+    ) -> list[dict[str, Any]]:
+        recommendation_id = str(recommendation.get("recommendation_id") or "")
         target_type = str(recommendation.get("target_type") or "")
         target_value = str(recommendation.get("target_value") or "")
         cf_action = self._rule_action(str(recommendation.get("action") or ""))
@@ -324,8 +523,7 @@ class CloudflareEnforcer:
             recommendation.get("enforcement_expires_at")
             or recommendation.get("expires_at")
             or ""
-        )
-        zone_hosts = self._targets_for_recommendation(recommendation)
+         )
         stored: list[dict[str, Any]] = []
         newly_created: list[dict[str, Any]] = []
 
@@ -337,7 +535,7 @@ class CloudflareEnforcer:
                 existing = next(
                     (
                         rule
-                        for rule in existing_rules
+                      for rule in existing_rules
                         if str(rule.get("ref") or "") == ref
                     ),
                     None,
@@ -365,6 +563,8 @@ class CloudflareEnforcer:
                             hosts=hosts,
                             ref=ref,
                             reused=True,
+                            target_value=target_value,
+                            expires_at=expires_at,
                         )
                     )
                     continue
@@ -379,7 +579,7 @@ class CloudflareEnforcer:
                     payload={
                         "action": cf_action,
                         "expression": expression,
-                        "description": description,
+                      "description": description,
                         "ref": ref,
                         "enabled": True,
                     },
@@ -388,8 +588,8 @@ class CloudflareEnforcer:
                 rule_id = ""
                 for rule in result.get("rules") or []:
                     if isinstance(rule, dict) and str(rule.get("ref") or "") == ref:
-                        rule_id = str(rule.get("id") or "")
-                        break
+                    rule_id = str(rule.get("id") or "")
+                    break
                 if not rule_id:
                     raise CloudflareEnforcementError(
                         "Cloudflare rule creation response omitted the new rule id"
@@ -403,13 +603,13 @@ class CloudflareEnforcer:
                     hosts=hosts,
                     ref=ref,
                     reused=False,
-                )
+                    target_value=target_value,
+                    expires_at=expires_at,
+                 )
                 stored.append(item)
                 newly_created.append(item)
             return stored
         except Exception:
-            # Approval is atomic from Hotpot's perspective. Roll back only rules
-            # created by this attempt. Pre-existing idempotent refs are left intact.
             for rule in reversed(newly_created):
                 try:
                     await self.remove_rule(rule)
@@ -417,10 +617,55 @@ class CloudflareEnforcer:
                     pass
             raise
 
+    async def apply(self, recommendation: dict[str, Any]) -> list[dict[str, Any]]:
+        if not self.config.configured:
+            raise CloudflareEnforcementError(
+                "Cloudflare enforcement is not fully configured"
+            )
+        zone_hosts = self._targets_for_recommendation(recommendation)
+        if self._uses_ip_access_rule(recommendation):
+            return await self._apply_ip_access_long_block(recommendation, zone_hosts)
+        return await self._apply_custom_waf(recommendation, zone_hosts)
+
     async def remove_rule(self, rule: dict[str, Any]) -> None:
+        provider = str(rule.get("provider") or CUSTOM_WAF_PROVIDER)
         zone_id = str(rule.get("zone_id") or "")
-        ruleset_id = str(rule.get("ruleset_id") or "")
         rule_id = str(rule.get("rule_id") or "")
+        if provider == IP_ACCESS_PROVIDER:
+            if not zone_id or not rule_id:
+                raise CloudflareEnforcementError(
+                    "stored IP Access rule metadata is incomplete"
+                )
+            current = await self.inspect_access_rule(zone_id, rule_id)
+            if current is None:
+                return
+            notes = _parse_access_notes(current.get("notes"))
+            if not notes:
+                raise CloudflareEnforcementError(
+                    "refusing to remove IP Access rule no longer owned by Hotpot"
+                )
+            expected_target = str(rule.get("target_value") or "")
+            current_target = str((current.get("configuration") or {}).get("value") or "")
+            if expected_target and current_target != expected_target:
+                raise CloudflareEnforcementError(
+                    "IP Access rule target changed since Hotpot applied it"
+                )
+            remote_expiry = _parse_iso(notes.get("expires"))
+            stored_expiry = _parse_iso(rule.get("expires_at"))
+            if (
+                remote_expiry is not None
+                and stored_expiry is not None
+                and remote_expiry > stored_expiry
+            ):
+                return
+            await self._request(
+                "DELETE",
+                f"/zones/{zone_id}/firewall/access_rules/rules/{rule_id}",
+                allow_404=True,
+            )
+            return
+
+        ruleset_id = str(rule.get("ruleset_id") or "")
         if not zone_id or not ruleset_id or not rule_id:
             raise CloudflareEnforcementError(
                 "stored Cloudflare rule metadata is incomplete"
@@ -439,6 +684,7 @@ class CloudflareEnforcer:
             except Exception as exc:
                 errors.append(
                     {
+                        "provider": rule.get("provider") or CUSTOM_WAF_PROVIDER,
                         "zone_id": rule.get("zone_id"),
                         "rule_id": rule.get("rule_id"),
                         "error": f"{type(exc).__name__}: {exc}",
@@ -452,11 +698,9 @@ class CloudflareEnforcer:
         """Compare persisted Hotpot rules with Cloudflare without mutating either."""
 
         checked_at = datetime.now(timezone.utc).isoformat()
-        expected_by_zone: dict[str, list[dict[str, Any]]] = {}
+        expected_custom_by_zone: dict[str, list[dict[str, Any]]] = {}
+        expected_access_by_zone: dict[str, list[dict[str, Any]]] = {}
         recommendation_results: dict[str, dict[str, Any]] = {}
-        configured_zones = {
-            target.zone_id for target in self.config.targets.values() if target.zone_id
-        }
 
         for recommendation in recommendations:
             recommendation_id = str(
@@ -473,12 +717,15 @@ class CloudflareEnforcer:
             for rule in recommendation.get("enforcement_rules") or []:
                 if not isinstance(rule, dict):
                     continue
-                zone_id = str(rule.get("zone_id") or "").strip()
+                provider = str(rule.get("provider") or CUSTOM_WAF_PROVIDER)
+                zone_id = str(rule.get("zone_id") or "").trip()
+                rule_id = str(rule.get("rule_id") or "").strip()
                 ref = str(rule.get("ref") or "").strip()
-                if not zone_id or not ref:
+                if not zone_id or not rule_id:
                     recommendation_results[recommendation_id]["status"] = "drifted"
                     recommendation_results[recommendation_id]["rules"].append(
                         {
+                            "provider": provider,
                             "zone_id": zone_id or None,
                             "ref": ref or None,
                             "status": "drifted",
@@ -486,19 +733,36 @@ class CloudflareEnforcer:
                         }
                     )
                     continue
-                expected_by_zone.setdefault(zone_id, []).append(
-                    {
-                        "recommendation_id": recommendation_id,
-                        "zone_id": zone_id,
-                        "ruleset_id": str(rule.get("ruleset_id") or ""),
-                        "rule_id": str(rule.get("rule_id") or ""),
-                        "ref": ref,
-                        "action": str(rule.get("action") or ""),
-                        "expression": str(rule.get("expression") or ""),
-                    }
-                )
+                expected = {
+                    "recommendation_id": recommendation_id,
+                    "provider": provider,
+                    "zone_id": zone_id,
+                    "ruleset_id": str(rule.get("ruleset_id") or ""),
+                    "rule_id": rule_id,
+                    "ref": ref,
+                    "action": str(rule.get("action") or ""),
+                    "expression": str(rule.get("expression") or ""),
+                    "target_value": str(rule.get("target_value") or ""),
+                    "expires_at": str(rule.get("expires_at") or ""),
+                }
+                if provider == IP_ACCESS_PROVIDER:
+                    expected_access_by_zone.setdefault(zone_id, []).append(expected)
+                else:
+                    if not ref:
+                        recommendation_results[recommendation_id]["status"] = "drifted"
+                        recommendation_results[recommendation_id]["rules"].append(
+                            {
+                                "provider": provider,
+                                "zone_id": zone_id,
+                                "ref": None,
+                                "status": "drifted",
+                              "detail": "persisted WAF rule ref is missing",
+                            }
+                        )
+                        continue
+                    expected_custom_by_zone.setdefault(zone_id, []).append(expected)
 
-        zones = sorted(configured_zones | set(expected_by_zone))
+        zones = sorted(set(expected_custom_by_zone) | set(expected_access_by_zone))
         orphans: list[dict[str, Any]] = []
         zone_errors: list[dict[str, Any]] = []
         status_rank = {"healthy": 0, "drifted": 1, "missing": 2, "error": 3}
@@ -510,7 +774,8 @@ class CloudflareEnforcer:
                 result["status"] = status
             result["rules"].append(
                 {
-                    "zone_id": expected["zone_id"],
+                    "provider": expected["provider"],
+                    "zone_id": expected["zne_id"],
                     "ref": expected["ref"],
                     "expected_rule_id": expected["rule_id"],
                     "status": status,
@@ -519,66 +784,103 @@ class CloudflareEnforcer:
             )
 
         for zone_id in zones:
-            expected_rules = expected_by_zone.get(zone_id, [])
-            expected_refs = {value["ref"] for value in expected_rules}
-            try:
-                inspected = await self.inspect_zone(zone_id)
-            except Exception as exc:
-                message = f"{type(exc).__name__}: {exc}"
-                zone_errors.append({"zone_id": zone_id, "error": message})
-                for expected in expected_rules:
-                    mark_rule(expected, "error", message)
-                continue
-
-            observed_rules = list(inspected.get("rules") or [])
-            observed_by_ref = {
-                str(rule.get("ref") or ""): rule
-                for rule in observed_rules
-                if str(rule.get("ref") or "")
-            }
-            for expected in expected_rules:
-                observed = observed_by_ref.get(expected["ref"])
-                if observed is None:
-                    detail = (
-                        "custom WAF entrypoint is missing"
-                        if not inspected.get("entrypoint_exists")
-                        else "expected Hotpot rule was not found"
+            custom_expected = expected_custom_by_zone.get(zone_id, [])
+            if custom_expected:
+                try:
+                    inspected = await self.inspect_zone(zone_id)
+                except Exception as exc:
+                    message = f"{type(exc).__name__}: {exc}"
+                    zone_errors.append(
+                        {"zne_id": zone_id, "provider": CUSTOM_WAF_PROVIDER, "error": message}
                     )
-                    mark_rule(expected, "missing", detail)
-                    continue
+                    for expected in custom_expected:
+                        mark_rule(expected, "error", message)
+                else:
+                    expected_refs = {value["ref"] for value in custom_expected}
+                    observed_rules = list(inspected.get("rules") or [])
+                    observed_by_ref = {
+                        str(rule.get("ref") or ""): rule
+                        for rule in observed_rules
+                        if str(rule.get("ref") or "")
+                    }
+                    for expected in custom_expected:
+                        observed = observed_by_ref.get(expected["ref"])
+                        if observed is None:
+                            detail = (
+                                "custom WAF entrypoint is missing"
+                                if not inspected.get("entrypoint_exists")
+                                else "expected Hotpot rule was not found"
+                            )
+                            mark_rule(expected, "missing", detail)
+                            continue
+                        differences: list[str] = []
+                        if expected["rule_id"] and str(observed.get("id") or "") != expected["rule_id"]:
+                            differences.append("rule id changed")
+                        if expected["ruleset_id"] and str(inspected.get("ruleset_id") or "") != expected["ruleset_id"]:
+                            differences.append("ruleset id changed")
+                        if expected["action"] and str(observed.get("action") or "") != expected["action"]:
+                            differences.append("action changed")
+                        if expected["expression"] and str(observed.get("expression") or "") != expected["expression"]:
+                            differences.append("expression changed")
+                        if observed.get("enabled") is False:
+                            differences.append("rule disabled")
+                        if differences :
+                            mark_rule(expected, "drifted", "; ".join(differences))
+                        else:
+                            mark_rule(expected, "healthy", "matches persisted Hotpot WAF rule")
+                    for observed in observed_rules:
+                        ref = str(observed.get("ref") or "")
+                        if not ref.startswith("hotpot_") or ref in expected_refs:
+                            continue
+                        orphans.append(
+                            {
+                                "provider": CUSTOM_WAF_PROVIDER,
+                                "zone_id": zone_id,
+                                "ruleset_id": inspected.get("ruleset_id"),
+                                "rule_id": observed.get("id"),
+                                "ref": ref,
+                                "action": observed.get("action"),
+                                "expression": observed.get("expression"),
+                                "enabled": observed.get("enabled", True),
+                                "description": observed.get("description"),
+                            }
+                        )
 
+            for expected in expected_access_by_zone.get(zone_id, []):
+                try:
+                    observed = await self.inspect_access_rule(zone_id, expected["rule_id"])
+                except Exception as exc:
+                    message = f"{type(exc).__name__}: {exc}"
+                    zone_errors.append(
+                        {"zne_id": zone_id, "provider": IP_ACCESS_PROVIDER, "error": message}
+                    )
+                    mark_rule(expected, "error", message)
+                    continue
+                if observed is None:
+                    mark_rule(expected, "missing", "expected Hotpot IP Access rule was not found")
+                    continue
                 differences: list[str] = []
-                if expected["rule_id"] and str(observed.get("id") or "") != expected["rule_id"]:
-                    differences.append("rule id changed")
-                if expected["ruleset_id"] and str(inspected.get("ruleset_id") or "") != expected["ruleset_id"]:
-                    differences.append("ruleset id changed")
-                if expected["action"] and str(observed.get("action") or "") != expected["action"]:
-                    differences.append("action changed")
-                if expected["expression"] and str(observed.get("expression") or "") != expected["expression"]:
-                    differences.append("expression changed")
-                if observed.get("enabled") is False:
-                    differences.append("rule disabled")
+                if str(observed.get("mode") or "") != "block":
+                    differences.append("mode changed")
+                current_target = str((observed.get("configuration") or {}).get("value") or "")
+                if expected["target_value"] and current_target != expected["target_value"]:
+                    differences.append("target changed")
+                notes = _parse_access_notes(observed.get("notes"))
+                if not notes:
+                    differences.append("Hotpot ownership marker missing")
+                else:
+                    remote_expiry = _parse_iso(notes.get("expires"))
+                    expected_expiry = _parse_iso(expected["expires_at"])
+                    if (
+                        remote_expiry is not None
+                        and expected_expiry is not None
+                        and remote_expiry < expected_expiry
+                    ):
+                        differences.append("expiry shortened")
                 if differences:
                     mark_rule(expected, "drifted", "; ".join(differences))
                 else:
-                    mark_rule(expected, "healthy", "matches persisted Hotpot rule")
-
-            for observed in observed_rules:
-                ref = str(observed.get("ref") or "")
-                if not ref.startswith("hotpot_") or ref in expected_refs:
-                    continue
-                orphans.append(
-                    {
-                        "zone_id": zone_id,
-                        "ruleset_id": inspected.get("ruleset_id"),
-                        "rule_id": observed.get("id"),
-                        "ref": ref,
-                        "action": observed.get("action"),
-                        "expression": observed.get("expression"),
-                        "enabled": observed.get("enabled", True),
-                        "description": observed.get("description"),
-                    }
-                )
+                    mark_rule(expected, "healthy", "matches persisted Hotpot IP Access rule")
 
         values = list(recommendation_results.values())
         counts = {

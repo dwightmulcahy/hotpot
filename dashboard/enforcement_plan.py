@@ -16,7 +16,7 @@ def _cloudflare_action(recommendation_action: str) -> str:
 def build_enforcement_plan(
     recommendation: dict[str, Any], config: CloudflareConfig
 ) -> dict[str, Any]:
-    """Build the exact Cloudflare rule plan without making any API requests."""
+    """Build the exact Cloudflare enforcement plan without making API requests."""
 
     recommendation_id = str(recommendation.get("recommendation_id") or "").strip()
     if not recommendation_id:
@@ -41,9 +41,28 @@ def build_enforcement_plan(
         target = config.targets[instance_id]
         by_zone.setdefault(target.zone_id, set()).update(target.hosts)
 
+    use_ip_access = action == "recommend_long_block" and target_type == "ip"
     zones: list[dict[str, Any]] = []
     for zone_id, host_values in sorted(by_zone.items()):
         hosts = tuple(sorted(host_values))
+        if use_ip_access:
+            zones.append(
+                {
+                    "zone_id": zone_id,
+                    "hosts": list(hosts),
+                    "action": "block",
+                    "provider": "ip_access",
+                    "scope": "zone",
+                    "expression": None,
+                    "ref": None,
+                    "expected_effect": (
+                        "Cloudflare zone-wide IP Access block; does not consume a "
+                        "custom WAF rule slot"
+                    ),
+                }
+            )
+            continue
+
         expression = build_expression(target_type, target_value, hosts)
         ref = f"hotpot_{recommendation_id[:20]}_{zone_id[:8]}"
         zones.append(
@@ -51,6 +70,8 @@ def build_enforcement_plan(
                 "zone_id": zone_id,
                 "hosts": list(hosts),
                 "action": cf_action,
+                "provider": "custom_waf",
+                "scope": "configured-hostnames",
                 "expression": expression,
                 "ref": ref,
                 "expected_effect": (
@@ -66,6 +87,7 @@ def build_enforcement_plan(
         "actor_key": recommendation.get("actor_key"),
         "recommendation_action": action,
         "cloudflare_action": cf_action,
+        "provider": "ip_access" if use_ip_access else "custom_waf",
         "target_type": target_type,
         "target_value": target_value,
         "duration_hours": recommendation.get("duration_hours"),
