@@ -6,8 +6,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from .cloudflare_enforcement import (
+    CUSTOM_WAF_PROVIDER,
+    HOT_POT_ACCESS_NOTES_PREFIX,
+    IP_ACCESS_PROVIDER,
     CloudflareEnforcementError,
     CloudflareEnforcer,
+    _parse_access_notes,
+    _parse_iso,
     build_expression,
 )
 
@@ -22,7 +27,7 @@ class CloudflareTransactionError(CloudflareEnforcementError):
 
 
 class TransactionalCloudflareEnforcer(CloudflareEnforcer):
-    """Add bounded retries and post-operation verification to WAF mutations."""
+    """Add bounded retries and post-operation verification to Cloudflare mutations."""
 
     def __init__(self, config, client) -> None:
         super().__init__(config, client)
@@ -63,10 +68,14 @@ class TransactionalCloudflareEnforcer(CloudflareEnforcer):
                             "Cloudflare API reported an unsuccessful operation"
                         )
                     return response.status, data if isinstance(data, dict) else None
-                message = f"Cloudflare API returned HTTP {response.status}"
+                messade = f"Cloudflare API returned HTTP {response.status}"
                 if isinstance(data, dict):
                     errors = data.get("errors") or []
-                    if errors and isinstance(errors[0], dict) and errors[0].get("message"):
+                    if (
+                        errors
+                        and isinstance(errors[0], dict)
+                        and errors[0].get("message")
+                    ):
                         message += f": {errors[0]['message']}"
                 retryable = response.status == 429 or response.status >= 500
                 if not retryable or attempt >= self.retry_attempts:
@@ -90,6 +99,38 @@ class TransactionalCloudflareEnforcer(CloudflareEnforcer):
             zones = self._targets_for_recommendation(recommendation)
         except Exception:
             return residual
+
+        if self._uses_ip_access_rule(recommendation):
+            target_value = str(recommendation.get("target_value") or "")
+            expires_at = str(
+                recommendation.get("enforcement_expires_at")
+                or recommendation.get("expires_at")
+                or ""
+            )
+            for zone_id, hosts in zones.items():
+                try:
+                    current = await self._find_hotpot_access_rule(zone_id, target_value)
+                except Exception:
+                    continue
+                if current is None:
+                    continue
+                residual.append(
+                    self._stored_rule(
+                        zone_id=zone_id,
+                        ruleset_id="",
+                        rule_id=str(current.get("id") or ""),
+                        action="block",
+                        expression=f"ip.src eq {target_value}",
+                        hosts=hosts,
+                        ref=f"hotpot_ip_{recommendation_id[:16]}_{zone_id[:8]}",
+                        reused=True,
+                        provider=IP_ACCESS_PROVIDER,
+                        target_value=target_value,
+                        expires_at=expires_at,
+                    )
+                )
+            return residual
+
         for zone_id, hosts in zones.items():
             inspected = await self.inspect_zone(zone_id)
             ruleset_id = str(inspected.get("ruleset_id") or "")
@@ -99,6 +140,7 @@ class TransactionalCloudflareEnforcer(CloudflareEnforcer):
                     continue
                 residual.append(
                     {
+                        "provider": CUSTOM_WAF_PROVIDER,
                         "zone_id": zone_id,
                         "ruleset_id": ruleset_id,
                         "rule_id": str(row.get("id") or ""),
@@ -112,12 +154,37 @@ class TransactionalCloudflareEnforcer(CloudflareEnforcer):
 
     async def _verify_rules(self, rules: list[dict[str, Any]]) -> None:
         for expected in rules:
-            inspected = await self.inspect_zone(str(expected.get("zone_id") or ""))
+            provider = str(expected.get("provider") or CUSTOM_WAF_PROVIDER)
+            zone_id = str(expected.get("zne_id") or "")
+            if provider == IP_ACCESS_PROVIDER:
+                current = await self.inspect_access_rule(
+                    zone_id, str(expected.get("rule_id") or "")
+                )
+                if current is None:
+                    raise CloudflareEnforcementError(
+                        "Cloudflare verification could not find an applied IP Access rule"
+                    )
+                configuration = current.get("configuration") or {}
+                if (
+                    str(current.get("mode") or "") != "block"
+                    or str(configuration.get("value") or "")
+                    != str(expected.get("target_value") or "")
+                    or not str(current.get("notes") or "").startswith(
+                        HOT_POT_ACCESS_NOTES_PREFIX
+                    )
+                ):
+                    raise CloudflareEnforcementError(
+                        "Cloudflare verification found a drifted IP Access rule"
+                    )
+                continue
+
+            inspected = await self.inspect_zone(zone_id)
             current = next(
                 (
                     row
                     for row in inspected.get("rules") or []
-                    if str(row.get("ref") or "") == str(expected.get("ref") or "")
+                    if str(row.get("ref") or "")
+                    == str(expected.get("ref") or "")
                 ),
                 None,
             )
@@ -126,7 +193,8 @@ class TransactionalCloudflareEnforcer(CloudflareEnforcer):
                     "Cloudflare verification could not find an applied rule"
                 )
             if (
-                str(current.get("action") or "") != str(expected.get("action") or "")
+                str(current.get("action") or "")
+                != str(expected.get("action") or "")
                 or str(current.get("expression") or "")
                 != str(expected.get("expression") or "")
                 or current.get("enabled", True) is False
@@ -150,8 +218,32 @@ class TransactionalCloudflareEnforcer(CloudflareEnforcer):
             raise
 
     async def remove_rule(self, rule: dict[str, Any]) -> None:
+        provider = str(rule.get("provider") or CUSTOM_WAF_PROVIDER)
         await super().remove_rule(rule)
-        inspected = await self.inspect_zone(str(rule.get("zone_id") or ""))
+        zone_id = str(rule.get("zone_id") or "")
+
+        if provider == IP_ACCESS_PROVIDER:
+            current = await self.inspect_access_rule(
+                zone_id, str(rule.get("rule_id") or "")
+            )
+            if current is None:
+                return
+            notes = _parse_access_notes(current.get("notes"))
+            remote_expiry = _parse_iso(notes.get("expires")) if notes else None
+            stored_expiry = _parse_iso(rule.get("expires_at"))
+            if (
+                remote_expiry is not None
+                and stored_expiry is not None
+                and remote_expiry > stored_expiry
+            ):
+                # A newer recommendation extended this shared IP block. Retention is
+                # intentional; the later recommendation owns the final deletion.
+                return
+            raise CloudflareEnforcementError(
+                "Cloudflare IP Access rule still exists after deletion"
+            )
+
+        inspected = await self.inspect_zone(zone_id)
         rule_id = str(rule.get("rule_id") or "")
         ref = str(rule.get("ref") or "")
         for current in inspected.get("rules") or []:
@@ -165,6 +257,29 @@ class TransactionalCloudflareEnforcer(CloudflareEnforcer):
                 )
 
     async def repair(self, recommendation: dict[str, Any]) -> list[dict[str, Any]]:
+        persisted_rules = [
+            rule
+            for rule in recommendation.get("enforcement_rules") or []
+            if isinstance(rule, dict)
+        ]
+        providers = {
+            str(rule.get("provider") or CUSTOM_WAF_PROVIDER)
+            for rule in persisted_rules
+        }
+
+        # Preserve pre-upgrade long blocks as custom-WAF rules until they expire.
+        # This keeps old persisted state fully repairable. New long IP blocks created
+        # after this change are stored with provider=ip_access and repair through the
+        # IP Access path below.
+        repair_ip_access = (
+            self._uses_ip_access_rule(recommendation)
+            and (not persisted_rules or IP_ACCESS_PROVIDER in providers)
+        )
+        if repair_ip_access:
+            rules = await super().apply(recommendation)
+            await self._verify_rules(rules)
+            return rules
+
         target_type = str(recommendation.get("target_type") or "")
         target_value = str(recommendation.get("target_value") or "")
         action = self._rule_action(str(recommendation.get("action") or ""))
@@ -185,6 +300,7 @@ class TransactionalCloudflareEnforcer(CloudflareEnforcer):
                     break
                 await self.remove_rule(
                     {
+                        "provider": CUSTOM_WAF_PROVIDER,
                         "zone_id": zone_id,
                         "ruleset_id": str(inspected.get("ruleset_id") or ""),
                         "rule_id": str(current.get("id") or ""),
@@ -192,4 +308,9 @@ class TransactionalCloudflareEnforcer(CloudflareEnforcer):
                     }
                 )
                 break
-        return await self.apply(recommendation)
+
+        # Force the legacy custom-WAF creation path rather than switching an existing
+        # persisted long block to a different provider behind the store's back.
+        rules = await self._apply_custom_waf(recommendation, zones)
+        await self._verify_rules(rules)
+        return rules
