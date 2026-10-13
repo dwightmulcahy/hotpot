@@ -108,7 +108,7 @@ class CloudflareEnforcer(IPAccessMixin, _LegacyEnforcer):
             else:
                 custom.append(recommendation)
 
-        if custom:
+        if custom or not access:
             base = await super().reconcile(custom)
         else:
             base = {
