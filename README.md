@@ -1,5 +1,19 @@
 # Hotpot
 
+[![CI](https://github.com/dwightmulcahy/hotpot/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/dwightmulcahy/hotpot/actions/workflows/ci.yml)
+[![Release](https://github.com/dwightmulcahy/hotpot/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/dwightmulcahy/hotpot/actions/workflows/docker-publish.yml)
+[![Latest Release](https://img.shields.io/github/v/release/dwightmulcahy/hotpot?display_name=tag&sort=semver)](https://github.com/dwightmulcahy/hotpot/releases/latest)
+[![Last Commit](https://img.shields.io/github/last-commit/dwightmulcahy/hotpot)](https://github.com/dwightmulcahy/hotpot/commits/main)
+[![Open Issues](https://img.shields.io/github/issues/dwightmulcahy/hotpot)](https://github.com/dwightmulcahy/hotpot/issues)
+[![Docker Pulls](https://img.shields.io/docker/pulls/dwightmulcahy/hotpot?logo=docker)](https://hub.docker.com/r/dwightmulcahy/hotpot)
+[![Docker Image Size](https://img.shields.io/docker/image-size/dwightmulcahy/hotpot/latest?logo=docker)](https://hub.docker.com/r/dwightmulcahy/hotpot/tags)
+[![Platforms](https://img.shields.io/badge/platforms-linux%2Famd64%20%7C%20linux%2Farm64-2496ED?logo=docker&logoColor=white)](https://github.com/dwightmulcahy/hotpot/actions/workflows/docker-publish.yml)
+[![Python](https://img.shields.io/badge/Python-3.12%20%7C%203.14-3776AB?logo=python&logoColor=white)](https://github.com/dwightmulcahy/hotpot/actions/workflows/ci.yml)
+[![Dependabot](https://img.shields.io/badge/Dependabot-pip%20%7C%20Docker%20%7C%20Actions-025E8C?logo=dependabot&logoColor=white)](https://github.com/dwightmulcahy/hotpot/blob/main/.github/dependabot.yml)
+[![SBOM](https://img.shields.io/badge/SBOM-enabled-2ea44f)](https://github.com/dwightmulcahy/hotpot/actions/workflows/docker-publish.yml)
+[![Provenance](https://img.shields.io/badge/provenance-attested-2ea44f)](https://github.com/dwightmulcahy/hotpot/actions/workflows/docker-publish.yml)
+[![Security Policy](https://img.shields.io/badge/security-policy-0969da?logo=github&logoColor=white)](https://github.com/dwightmulcahy/hotpot/security/policy)
+
 Hotpot is a transparent HTTP/WebSocket reverse proxy, deception layer, bounded tarpit, and attack-intelligence service designed to sit in front of an existing Dockerized web application. Normal requests are forwarded unchanged. High-confidence probes are intercepted, classified, recorded, and answered by Hotpot instead of ever reaching the protected application.
 
 ```text
