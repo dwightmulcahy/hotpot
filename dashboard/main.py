@@ -8,6 +8,7 @@ from pathlib import Path
 from aiohttp import web
 
 from . import runtime as core
+from .auto_response import install_auto_response
 from .backups import DashboardBackupManager
 from .enforcement_plan import build_enforcement_plan
 from .manual_response import ManualResponseService
@@ -207,6 +208,7 @@ async def api_manual_response_apply(request: web.Request) -> web.Response:
 
 def build_app() -> web.Application:
     app = build_dashboard_app()
+    install_auto_response(app)
     app.on_startup.append(_metrics_startup)
     app.on_startup.append(_backup_startup)
     app.on_cleanup.insert(0, _backup_shutdown)
