@@ -18,7 +18,7 @@ def recommendation(
     *,
     action: str = "recommend_challenge",
     confidence: str = "high",
-    target: str = "203.0.113.77",
+    target: str = "45.138.12.26",
     level: int = 3,
     hits: int = 20,
     apps: int = 2,
@@ -184,7 +184,7 @@ class AutoResponseStateStoreTests(unittest.TestCase):
         conn.execute(
             "INSERT INTO events(attacker_key, ts, payload_json) VALUES (?, ?, ?)",
             (
-                "203.0.113.77",
+                "45.138.12.26",
                 datetime.now(timezone.utc).isoformat(),
                 json.dumps(
                     {
@@ -198,7 +198,7 @@ class AutoResponseStateStoreTests(unittest.TestCase):
         conn.commit()
         conn.close()
         status = self.store.verified_bot_status(
-            "203.0.113.77", active_window_hours=24
+            "45.138.12.26", active_window_hours=24
         )
         self.assertTrue(status["available"])
         self.assertTrue(status["verified"])
