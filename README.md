@@ -6,9 +6,8 @@
 
 [![CI](https://github.com/dwightmulcahy/hotpot/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/dwightmulcahy/hotpot/actions/workflows/ci.yml)
 [![Release](https://github.com/dwightmulcahy/hotpot/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/dwightmulcahy/hotpot/actions/workflows/docker-publish.yml)
-[![Latest Release](https://img.shields.io/github/v/release/dwightmulcahy/hotpot?display_name=tag&sort=semver)](https://github.com/dwightmulcahy/hotpot/releases/latest)
-[![Last Commit](https://img.shields.io/github/last-commit/dwightmulcahy/hotpot)](https://github.com/dwightmulcahy/hotpot/commits/main)
-[![Open Issues](https://img.shields.io/github/issues/dwightmulcahy/hotpot)](https://github.com/dwightmulcahy/hotpot/issues)
+[![Releases](https://img.shields.io/badge/releases-view_latest-0969da?logo=github&logoColor=white)](https://github.com/dwightmulcahy/hotpot/releases/latest)
+[![Issues](https://img.shields.io/badge/issues-view_open-0969da?logo=github&logoColor=white)](https://github.com/dwightmulcahy/hotpot/issues)
 [![Docker Pulls](https://img.shields.io/docker/pulls/dwightmulcahy/hotpot?logo=docker)](https://hub.docker.com/r/dwightmulcahy/hotpot)
 [![Docker Image Size](https://img.shields.io/docker/image-size/dwightmulcahy/hotpot/latest?logo=docker)](https://hub.docker.com/r/dwightmulcahy/hotpot/tags)
 [![Platforms](https://img.shields.io/badge/platforms-linux%2Famd64%20%7C%20linux%2Farm64-2496ED?logo=docker&logoColor=white)](https://github.com/dwightmulcahy/hotpot/actions/workflows/docker-publish.yml)
