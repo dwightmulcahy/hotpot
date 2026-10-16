@@ -1,5 +1,9 @@
 # Hotpot
 
+<p align="center">
+  <img src="docs/logo/hotpot-logo.png" alt="Hotpot logo" width="420">
+</p>
+
 [![CI](https://github.com/dwightmulcahy/hotpot/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/dwightmulcahy/hotpot/actions/workflows/ci.yml)
 [![Release](https://github.com/dwightmulcahy/hotpot/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/dwightmulcahy/hotpot/actions/workflows/docker-publish.yml)
 [![Latest Release](https://img.shields.io/github/v/release/dwightmulcahy/hotpot?display_name=tag&sort=semver)](https://github.com/dwightmulcahy/hotpot/releases/latest)
