@@ -1,8 +1,10 @@
 # Threat-response recommendations and approved Cloudflare enforcement
 
-Hotpot's dashboard turns active attacker intelligence into reviewable response recommendations. Recommendations never enforce automatically. A dashboard user must explicitly approve an enforceable recommendation before Hotpot creates a temporary Cloudflare WAF custom rule.
+Hotpot's dashboard turns active attacker intelligence into reviewable response recommendations. Manual approval is always available. Optional guarded automation can be enabled in stages for selected high-confidence challenge/block recommendations; 7-day zone-wide long blocks always remain manual.
 
-Approved rules are persisted with the recommendation, scoped to the protected hostnames that actor targeted, and removed automatically when the approved duration expires. A dashboard restart does not lose the expiry/removal state.
+Applied rules are persisted with the recommendation and removed automatically when their duration expires. A dashboard restart does not lose the expiry/removal state.
+
+See [`auto-response.md`](auto-response.md) for the staged automatic-response rollout and guardrails.
 
 ## Default policy
 
@@ -22,17 +24,17 @@ The dashboard collects each Hotpot instance's configured allowlist and trusted-p
 
 Cloudflare's shared cross-zone Worker address (`2a06:98c0:3600::103`) is never used as an enforcement IP when a trustworthy Worker zone is unavailable. For a known Worker zone, Hotpot creates a WAF expression using `cf.worker.upstream_zone`, which is the Cloudflare field available during WAF rule evaluation.
 
-Rules are also hostname-scoped. If an actor targeted `hvac.bytemeloser.com`, approving that recommendation does not automatically block the same actor from every hostname in the `bytemeloser.com` zone unless those other protected instances were also part of the recommendation.
+Short challenges and 24-hour blocks are hostname-scoped Custom WAF rules. Long IP blocks use Cloudflare IP Access Rules and are zone-wide, so Hotpot keeps them manual even when guarded automation is active.
 
 ## Lifecycle
 
 Recommendations and enforcement metadata are persisted in `dashboard.sqlite3`:
 
-- `pending`: waiting for review
+- `pending`: waiting for review or guarded automation
 - `dismissed`: suppressed for the configured dismissal cooldown
-- `approved`: user approved; Cloudflare rule creation is pending/recoverable
+- `approved`: user or guarded automation approved; Cloudflare rule creation is pending/recoverable
 - `applied`: Cloudflare rule(s) are active
-- `failed`: an approved Cloudflare apply attempt failed
+- `failed`: an approved apply attempt failed
 - `expired`: recommendation expired or active Cloudflare rules were successfully removed
 
 Approval is durable. If Hotpot stops after recording `approved` but before completing the Cloudflare request, the dashboard refresh loop resumes the apply operation. Rule refs are deterministic, so a crash after Cloudflare accepted the rule but before SQLite was updated does not intentionally create a duplicate rule.
@@ -41,27 +43,44 @@ When `enforcement_expires_at` is reached, the dashboard deletes each stored Clou
 
 The dashboard also provides **Remove now** for an applied enforcement. If the actor is still active and still meets policy after early removal, a new recommendation can appear later. Active-rule cards show a live relative countdown while retaining the absolute expiration time in the detail/tooltip.
 
+## Guarded automatic response
+
+The dashboard supports four stages:
+
+- `off`: kill switch; all new enforcement requires manual approval
+- `shadow`: records what would be automated but performs no Cloudflare writes
+- `challenge`: automatically applies eligible high-confidence 6-hour managed challenges only
+- `active`: also applies eligible high-confidence 24-hour L4 hostname-scoped blocks
+
+Automatic response is fail-closed. It requires a direct globally routable IP, high confidence, multiple independent malicious signals, a healthy Cloudflare reconciliation, available rollback/removal capability, no policy suppression, and no verified legitimate IPverse bot match. It also has hourly/daily action caps.
+
+`recommend_long_block` is never automated.
+
+The dashboard persists mode changes in `dashboard.sqlite3`. Switching to `off` is the runtime kill switch and prevents the next automatic write even when an evaluation cycle is already running. An already-started Cloudflare transaction is allowed to finish rather than being cancelled mid-write.
+
 ## Cloudflare reconciliation
 
-Hotpot periodically performs a **read-only reconciliation** between applied enforcement stored in `dashboard.sqlite3` and the live Cloudflare custom-WAF entrypoint. Reconciliation never creates, repairs, changes, or deletes a rule by itself.
+Hotpot periodically performs a **read-only reconciliation** between applied enforcement stored in `dashboard.sqlite3` and live Cloudflare state. Reconciliation never creates, repairs, changes, or deletes a rule by itself.
 
-For each applied recommendation Hotpot verifies the deterministic rule reference, Cloudflare rule ID, ruleset ID, action, expression, and enabled state. The dashboard reports:
+For each applied recommendation Hotpot verifies the expected provider-specific Cloudflare state and reports:
 
-- `healthy`: the live Cloudflare rule matches the persisted Hotpot rule
-- `drifted`: the rule exists but was changed, disabled, or moved to a different ID/ruleset
-- `missing`: Hotpot believes the rule is applied but the expected rule is absent
+- `healthy`: live Cloudflare state matches persisted Hotpot state
+- `drifted`: a rule exists but differs from the persisted action/target/expiry
+- `missing`: Hotpot believes enforcement is applied but the expected rule is absent
 - `error`: Cloudflare could not be read for that rule/zone
-- `orphaned`: a `hotpot_...` rule exists in a configured or previously-used zone but no current applied recommendation owns it
+- `orphaned`: a Hotpot-owned rule exists but no current applied recommendation owns it
 
 The default reconciliation interval is 300 seconds and can be changed with `HOTPOT_CLOUDFLARE_RECONCILE_SECONDS` (minimum 60 seconds). The Enforcement tab also has **Reconcile now**, which performs the same read-only comparison immediately.
 
-A successful approval triggers an immediate reconciliation so the dashboard can confirm that the newly applied rule exists. A successful manual removal also triggers a fresh read.
+A successful apply triggers an immediate reconciliation so the dashboard can confirm the new Cloudflare state. A successful manual removal also triggers a fresh read.
+
+Guarded automation forces a healthy reconciliation immediately before automatic Cloudflare writes. Drift, missing rules, read errors, orphaned Hotpot rules, or pending transactional rollback cleanup opens the automation circuit breaker.
 
 ## Durable enforcement audit trail
 
-Enforcement lifecycle events are written to the additive `response_audit_log` table in `dashboard.sqlite3`. The audit trail records recommendation creation, approval, apply success/failure, manual or automatic removal, removal failures, reconciliation issues/resolution, and orphan detection/resolution.
+Enforcement lifecycle events are written to the additive `response_audit_log` table in `dashboard.sqlite3`. The audit trail records recommendation creation, approval, apply success/failure, manual or automatic removal, automatic-response shadow/approval/application events, mode changes, reconciliation issues/resolution, and orphan detection/resolution.
 
-Dashboard-triggered actions also record the authenticated Basic username, signed dashboard session ID, and `source=dashboard`. Automatic lifecycle activity remains `source=system`. This makes manual approvals/removals/reconciliation distinguishable from background processing.
+Dashboard-triggered actions record the authenticated username and signed dashboard session context. Automatic lifecycle activity records `principal=system`, making manual and automatic actions distinguishable.
 
 Audit entries store timestamps, recommendation/actor references where applicable, a human-readable message, and bounded JSON details such as Cloudflare rule identifiers. Repeated reconciliation checks do not continuously duplicate the same issue in the audit log; a new audit event is written when the reconciliation state changes.
 
@@ -76,24 +95,23 @@ The Operations tab includes **Run system check**. It is non-destructive and chec
 - SQLite `quick_check` plus a transaction that is rolled back after verifying write access
 - configured GeoIP databases and load errors
 - Cloudflare target mappings
-- read-only access to each configured Cloudflare custom-WAF entrypoint; a zone with no entrypoint yet is still considered accessible
+- read-only access to configured Cloudflare enforcement entrypoints
 - recorded housekeeping state and maintenance errors
 
-The system check does not create a test WAF rule and does not change Cloudflare configuration.
+The system check does not create a test Cloudflare rule and does not change Cloudflare configuration.
 
 ## Cloudflare implementation
 
-Hotpot uses the zone Rulesets API and the `http_request_firewall_custom` phase. It creates one temporary custom rule per affected Cloudflare zone, while combining all targeted configured hostnames in that zone into the rule expression.
+Hotpot uses two Cloudflare enforcement mechanisms on the Free-plan-friendly path:
 
-Actions map as follows:
+- `recommend_challenge` -> hostname-scoped Custom WAF `managed_challenge`
+- `recommend_block` -> hostname-scoped Custom WAF `block`
+- `recommend_long_block` targeting an IP -> zone-wide IP Access Rule `block`
+- `recommend_long_block` targeting a known Worker zone -> hostname-scoped Custom WAF `block`
 
-- `recommend_challenge` -> Cloudflare `managed_challenge`
-- `recommend_block` -> Cloudflare `block`
-- `recommend_long_block` -> Cloudflare `block`
+IP actors use their IP target. Known Cloudflare Worker actors use `cf.worker.upstream_zone` for Custom WAF enforcement. Hotpot never uses country, provider, or ASN as an enforcement selector.
 
-IP actors use an `ip.src` expression. Known Cloudflare Worker actors use `cf.worker.upstream_zone`. Hotpot never uses country, provider, or ASN as an enforcement selector.
-
-The API token should be restricted to the required zones and have **Zone WAF Write** permission. Keep it only in the dashboard environment or use `HOTPOT_CLOUDFLARE_API_TOKEN_FILE`; never put it in the repository.
+The API token should be restricted to the required zones and include the permissions needed for Custom WAF rules plus Firewall/IP Access Rules when long IP blocks are used. Keep it only in the dashboard environment or use `HOTPOT_CLOUDFLARE_API_TOKEN_FILE`; never put it in the repository.
 
 ## Dashboard action security
 
@@ -117,6 +135,7 @@ GET  /api/recommendations?status=failed
 GET  /api/recommendation?id=<recommendation_id>
 GET  /api/audit
 GET  /api/audit?recommendation_id=<recommendation_id>&limit=100
+GET  /api/auto-response
 
 POST /api/recommendation/<recommendation_id>/dismiss
      X-Hotpot-Action: dismiss
@@ -134,12 +153,18 @@ POST /api/enforcement/reconcile
      X-Hotpot-Action: reconcile
      X-Hotpot-CSRF: <session csrf token>
 
+POST /api/auto-response/mode
+     X-Hotpot-Action: auto-response-mode
+     X-Hotpot-CSRF: <session csrf token>
+     Content-Type: application/json
+     {"mode":"off|shadow|challenge|active"}
+
 POST /api/system-check
      X-Hotpot-Action: system-check
      X-Hotpot-CSRF: <session csrf token>
 ```
 
-There is no automatic approval endpoint. Hotpot will automatically **remove** an already approved/applied rule at expiry, but it will not automatically approve or create a new enforcement rule. Reconciliation is detection-only; it does not automatically repair drift or remove orphaned rules.
+Hotpot automatically removes applied enforcement at expiry. Reconciliation remains detection-only; it does not automatically repair drift or remove orphaned rules.
 
 ## Configuration
 
@@ -153,11 +178,23 @@ HOTPOT_RESPONSE_RECOMMENDATION_TTL_HOURS=24
 HOTPOT_RESPONSE_DISMISS_HOURS=24
 ```
 
+Guarded automatic-response settings:
+
+```dotenv
+HOTPOT_AUTO_RESPONSE_MODE=off
+HOTPOT_AUTO_RESPONSE_CYCLE_SECONDS=30
+HOTPOT_AUTO_RESPONSE_MAX_PER_HOUR=5
+HOTPOT_AUTO_RESPONSE_MAX_PER_DAY=20
+HOTPOT_AUTO_RESPONSE_MIN_CHALLENGE_SIGNALS=2
+HOTPOT_AUTO_RESPONSE_MIN_BLOCK_SIGNALS=3
+HOTPOT_AUTO_RESPONSE_EXCLUDE_VERIFIED_BOTS=true
+```
+
 Cloudflare enforcement is opt-in and disabled by default:
 
 ```dotenv
 HOTPOT_CLOUDFLARE_ENFORCEMENT_ENABLED=false
-HOTPOT_CLOUDFLARE_API_TOKEN=REPLACE_WITH_ZONE_WAF_WRITE_TOKEN
+HOTPOT_CLOUDFLARE_API_TOKEN=REPLACE_WITH_CLOUDFLARE_WRITE_TOKEN
 # or HOTPOT_CLOUDFLARE_API_TOKEN_FILE=/run/secrets/cloudflare_api_token
 HOTPOT_CLOUDFLARE_RECONCILE_SECONDS=300
 HOTPOT_CLOUDFLARE_TARGETS={"monkeyhead":{"zone_id":"ZONE_ID","hosts":["www.monkeyheadbrewing.com"]},"watersolver":{"zone_id":"ZONE_ID","hosts":["brewwatersolver.com","www.brewwatersolver.com"]},"hvac":{"zone_id":"ZONE_ID","hosts":["hvac.bytemeloser.com"]},"tapmenu":{"zone_id":"ZONE_ID","hosts":["tapmenu.bytemeloser.com"]}}
@@ -165,10 +202,10 @@ HOTPOT_CLOUDFLARE_TARGETS={"monkeyhead":{"zone_id":"ZONE_ID","hosts":["www.monke
 
 `HOTPOT_CLOUDFLARE_TARGETS` keys must match the `id` values in `HOTPOT_DASHBOARD_INSTANCES`. Multiple instances may use the same `zone_id`; Hotpot deduplicates them into one rule for that zone when appropriate.
 
-Enable enforcement only after the token and target mapping are complete:
+Enable Cloudflare enforcement only after the token and target mapping are complete:
 
 ```dotenv
 HOTPOT_CLOUDFLARE_ENFORCEMENT_ENABLED=true
 ```
 
-No database reset is required. All reconciliation, audit, and dashboard-security migrations are additive.
+No database reset is required. All automatic-response, reconciliation, audit, and dashboard-security migrations are additive.
