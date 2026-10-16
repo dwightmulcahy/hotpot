@@ -3,10 +3,9 @@ name: CI
 on:
   push:
     branches:
-      - main
-      - develop
-      - feature/dashboard
+      - "**"
   pull_request:
+  workflow_call:
 
 permissions:
   contents: read
