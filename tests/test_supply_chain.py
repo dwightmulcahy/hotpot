@@ -55,6 +55,19 @@ class SupplyChainTests(unittest.TestCase):
         self.assertIn("version-update:semver-minor", config)
         self.assertIn("version-update:semver-major", config)
 
+    def test_ci_runs_on_every_branch_and_gates_releases(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        ci = (root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        release = (root / ".github" / "workflows" / "docker-publish.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('branches:\n      - "**"', ci)
+        self.assertIn("workflow_call:", ci)
+        self.assertIn("uses: ./.github/workflows/ci.yml", release)
+        self.assertRegex(release, r"(?ms)^  publish:\n.*?^    needs: ci$")
+        self.assertRegex(release, r"(?ms)^  release:\n.*?^    needs: publish$")
+
     def test_release_images_publish_sbom_provenance_and_github_attestations(self) -> None:
         root = Path(__file__).resolve().parents[1]
         workflow = (root / ".github" / "workflows" / "docker-publish.yml").read_text(
