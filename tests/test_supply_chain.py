@@ -9,6 +9,10 @@ PYTHON_BASE_RE = re.compile(
     r"^FROM python:\d+\.\d+\.\d+-alpine\d+\.\d+@sha256:[0-9a-f]{64}$",
     re.MULTILINE,
 )
+ATTEST_BUILD_PROVENANCE_RE = re.compile(
+    r"^\s*uses:\s*actions/attest-build-provenance@v(\d+)\s*$",
+    re.MULTILINE,
+)
 
 
 class SupplyChainTests(unittest.TestCase):
@@ -58,7 +62,12 @@ class SupplyChainTests(unittest.TestCase):
         )
         self.assertGreaterEqual(workflow.count("sbom: true"), 2)
         self.assertGreaterEqual(workflow.count("provenance: mode=max"), 2)
-        self.assertEqual(workflow.count("actions/attest-build-provenance@v3"), 2)
+        attest_majors = [int(value) for value in ATTEST_BUILD_PROVENANCE_RE.findall(workflow)]
+        self.assertEqual(len(attest_majors), 2)
+        self.assertTrue(
+            all(major >= 3 for major in attest_majors),
+            "attest-build-provenance must use major version 3 or newer",
+        )
         self.assertIn("id-token: write", workflow)
         self.assertIn("attestations: write", workflow)
         self.assertIn("id: hotpot-build", workflow)
