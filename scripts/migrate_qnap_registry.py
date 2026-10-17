@@ -200,9 +200,9 @@ def _compose_config(
 
 
 def _validation_context(text: str, detail: str) -> str:
-    match = re.search(r"\\bL(\\d+)\\.C(\\d+)\\b", detail)
+    match = re.search(r"\bL(\d+)\.C(\d+)\b", detail)
     if not match:
-        match = re.search(r"\\bline\\s+(\\d+)(?::(\\d+))?", detail, re.IGNORECASE)
+        match = re.search(r"\bline\s+(\d+)(?::(\d+))?", detail, re.IGNORECASE)
     if not match:
         return ""
 
