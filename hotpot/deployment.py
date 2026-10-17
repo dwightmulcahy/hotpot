@@ -21,11 +21,15 @@ def _fingerprint(payload: dict[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _secret_source(name: str) -> str:
+def _secret_source(name: str, *, configured: bool = False) -> str:
     if os.getenv(f"{name}_FILE", "").strip():
         return "file"
     if os.getenv(name, "").strip():
         return "environment"
+    if configured and os.getenv("HOTPOT_APP_REGISTRY", "").strip():
+        return "registry-file"
+    if configured:
+        return "configured"
     return "unset"
 
 
@@ -118,8 +122,14 @@ def deployment_snapshot(
         },
         "secret_sources": {
             "admin_token": _secret_source("HOTPOT_ADMIN_TOKEN"),
-            "collector_token": _secret_source("HOTPOT_COLLECTOR_TOKEN"),
-            "policy_token": _secret_source("HOTPOT_POLICY_TOKEN"),
+            "collector_token": _secret_source(
+                "HOTPOT_COLLECTOR_TOKEN",
+                configured=bool(settings.collector_token),
+            ),
+            "policy_token": _secret_source(
+                "HOTPOT_POLICY_TOKEN",
+                configured=bool(settings.policy_token),
+            ),
             "smtp_password": _secret_source("HOTPOT_SMTP_PASSWORD"),
             "webhook_bearer": _secret_source("HOTPOT_NOTIFY_WEBHOOK_BEARER"),
         },

@@ -47,6 +47,45 @@ class DeploymentMetadataTests(unittest.TestCase):
         self.assertEqual(snapshot["secret_sources"]["smtp_password"], "environment")
         self.assertEqual(snapshot["secret_sources"]["webhook_bearer"], "unset")
 
+    def test_registry_backed_scoped_tokens_report_their_effective_source(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            collector = root / "collector"
+            policy = root / "policy"
+            collector.write_text("collector-secret\n", encoding="utf-8")
+            policy.write_text("policy-secret\n", encoding="utf-8")
+            registry = root / "apps.toml"
+            registry.write_text(
+                f"""
+[[apps]]
+id = "one"
+name = "One"
+profiles = ["generic"]
+[apps.dashboard]
+url = "http://127.0.0.1:18001"
+[apps.credentials]
+collector_token_file = "{collector}"
+policy_token_file = "{policy}"
+""",
+                encoding="utf-8",
+            )
+            snapshot = self._snapshot(
+                {
+                    "HOTPOT_UPSTREAM": "http://127.0.0.1:8088",
+                    "HOTPOT_INSTANCE_ID": "one",
+                    "HOTPOT_APP_REGISTRY": str(registry),
+                }
+            )
+        self.assertEqual(
+            snapshot["secret_sources"]["collector_token"], "registry-file"
+        )
+        self.assertEqual(
+            snapshot["secret_sources"]["policy_token"], "registry-file"
+        )
+        encoded = json.dumps(snapshot)
+        self.assertNotIn("collector-secret", encoded)
+        self.assertNotIn("policy-secret", encoded)
+
     def test_shared_fingerprint_ignores_instance_specific_wiring(self) -> None:
         first = self._snapshot(
             {
