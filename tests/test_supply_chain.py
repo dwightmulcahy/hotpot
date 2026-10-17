@@ -65,9 +65,9 @@ class SupplyChainTests(unittest.TestCase):
         self.assertIn('branches:\n      - "**"', ci)
         self.assertIn("workflow_call:", ci)
         self.assertIn("name: Ruff and Pyflakes", ci)
-        self.assertIn("python -m ruff check hotpot dashboard tests .github/scripts", ci)
+        self.assertIn("python -m ruff check --select F hotpot dashboard tests .github/scripts", ci)
         self.assertIn("python -m pyflakes hotpot dashboard tests .github/scripts", ci)
-        self.assertGreaterEqual(ci.count("python -m unittest discover -s tests -v"), 2)
+        self.assertGreaterEqual(ci.count("-m unittest discover -s tests -v"), 2)
         self.assertIn("uses: ./.github/workflows/ci.yml", release)
         self.assertRegex(release, r"(?ms)^  ci:\n.*?^    needs: validate-tag$")
         self.assertRegex(release, r"(?ms)^  publish:\n.*?^    needs: ci$")
@@ -88,7 +88,11 @@ class SupplyChainTests(unittest.TestCase):
             "type=raw,value=latest",
         ):
             self.assertEqual(
-                workflow.count(docker_tag),
+                sum(
+                    1
+                    for line in workflow.splitlines()
+                    if line.strip() == docker_tag
+                ),
                 2,
                 f"both published images must receive Docker tag alias {docker_tag}",
             )
