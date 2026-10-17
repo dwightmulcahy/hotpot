@@ -17,7 +17,7 @@ Default-route allowlists (`0.0.0.0/0` and `::/0`) are prohibited rather than hid
 
 The dashboard stores policy rows and audit history in `dashboard.sqlite3`. It compiles a canonical snapshot for each configured Hotpot instance, hashes that snapshot, and compares the desired revision with the revision reported by `/_hotpot/api/policy`.
 
-When a revision differs, the dashboard sends the new snapshot using the shared Hotpot admin token and `X-Hotpot-Action: policy-sync`. The core validates the complete snapshot before atomically replacing `/data/policy.json`. Invalid snapshots are rejected and the previous valid snapshot remains active.
+When a revision differs, the dashboard sends the new snapshot using that app's scoped policy token and `X-Hotpot-Action: policy-sync`. A collector token cannot write policy. The legacy Hotpot admin token remains a full-access migration fallback. The core validates the complete snapshot before atomically replacing `/data/policy.json`. Invalid snapshots are rejected and the previous valid snapshot remains active.
 
 If the dashboard is unavailable, each Hotpot continues using its last valid `/data/policy.json`. `HOTPOT_ALLOW_CIDRS` remains independent bootstrap/emergency policy and is never overwritten by the dashboard.
 

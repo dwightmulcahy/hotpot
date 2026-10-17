@@ -30,27 +30,37 @@ HOTPOT_DASHBOARD_SESSION_SECRET_FILE=/run/secrets/dashboard_session_secret
 
 The dashboard audit trail records the authenticated Basic username and signed session ID for dashboard-triggered actions. Automatic lifecycle events continue to be recorded as system events.
 
-## File-backed secrets
+## File-backed and scoped core credentials
 
-The dashboard accepts file-backed forms for its sensitive credentials. When both forms are configured, `_FILE` takes precedence:
+Dashboard/viewer, Cloudflare and notification secrets continue to support `_FILE`
+forms. When both forms are configured, `_FILE` takes precedence:
 
 ```dotenv
-HOTPOT_ADMIN_TOKEN_FILE=/run/secrets/hotpot_admin_token
 HOTPOT_DASHBOARD_TOKEN_FILE=/run/secrets/dashboard_token
 HOTPOT_CLOUDFLARE_API_TOKEN_FILE=/run/secrets/cloudflare_api_token
 ```
 
-The existing direct environment variables remain supported:
+For a multi-app deployment, core credentials should instead be scoped per registry
+entry:
 
-```dotenv
-HOTPOT_ADMIN_TOKEN=...
-HOTPOT_DASHBOARD_TOKEN=...
-HOTPOT_CLOUDFLARE_API_TOKEN=...
+```toml
+[apps.credentials]
+collector_token_file = "/run/secrets/app-one/collector_token"
+policy_token_file = "/run/secrets/app-one/policy_token"
 ```
 
-File-backed values are read at dashboard startup. The hardened dashboard entrypoint only injects them temporarily while legacy constructors initialize and then restores the process environment. This keeps the actual credential value out of the container configuration when the deployment supplies only the `_FILE` variable.
+The collector credential can read a core's status/event/intelligence APIs but cannot
+write policy. The policy credential is accepted for reads and policy synchronization.
+The legacy `HOTPOT_ADMIN_TOKEN` remains supported as a full-access migration
+fallback, including `HOTPOT_ADMIN_TOKEN_FILE`.
 
-The secret file must be readable by the dashboard container user. On Docker/Compose, mount the file read-only and avoid placing the secret contents in the Compose file itself.
+Credential files are read at startup and values are never written to deployment
+metadata. The core/dashboard report only the source class. Secret files must be
+readable by the container user and mounted read-only.
+
+For isolation, each core should receive only its own per-app secret directory. The
+central dashboard needs the full per-app secret tree because it must collect from
+and reconcile policy to every configured core.
 
 ## API compatibility
 

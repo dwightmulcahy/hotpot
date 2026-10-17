@@ -162,6 +162,17 @@ class QnapUpgradeTests(unittest.TestCase):
         self.assertIn("[apps.deployment]", registry)
         self.assertIn("[apps.cloudflare]", registry)
 
+    def test_app_registry_runbook_documents_isolation_migration_and_fallback(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        doc = (root / "docs" / "app-registry.md").read_text(encoding="utf-8")
+        self.assertIn("Separate traffic plane, centralized intelligence", doc)
+        self.assertIn("collector token", doc)
+        self.assertIn("policy token", doc)
+        self.assertIn("only its own", doc)
+        self.assertIn("qnap-upgrade.sh --dry-run", doc)
+        self.assertIn("legacy", doc)
+        self.assertIn("HOTPOT_APP_REGISTRY", doc)
+
     def test_public_deployment_examples_use_generic_placeholders(self) -> None:
         root = Path(__file__).resolve().parents[1]
         compose = (root / "compose.qnap.example.yml").read_text(encoding="utf-8")
