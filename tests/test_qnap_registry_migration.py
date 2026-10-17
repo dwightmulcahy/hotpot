@@ -265,15 +265,20 @@ class QnapRegistryMigrationTests(unittest.TestCase):
             self.assertNotIn(f"{secrets_dir}:/run/secrets:ro\n    read_only", compose_text)
 
             hotpot_text = hotpot_env.read_text(encoding="utf-8")
-            self.assertNotIn("HOTPOT_PROFILES=", hotpot_text)
-            self.assertNotIn("HOTPOT_ADMIN_TOKEN=", hotpot_text)
-            self.assertNotIn("HOTPOT_SMTP_PASSWORD_FILE=", hotpot_text)
+            self.assertIn("HOTPOT_PROFILES=", hotpot_text)
+            self.assertIn("HOTPOT_ADMIN_TOKEN=legacy-admin-super-secret", hotpot_text)
+            self.assertIn(
+                "HOTPOT_SMTP_PASSWORD_FILE=/run/secrets/smtp_password",
+                hotpot_text,
+            )
 
             dashboard_text = dashboard_env.read_text(encoding="utf-8")
             self.assertIn("HOTPOT_APP_REGISTRY=/config/apps.toml", dashboard_text)
-            self.assertNotIn("HOTPOT_DASHBOARD_INSTANCES=", dashboard_text)
-            self.assertNotIn("HOTPOT_CLOUDFLARE_TARGETS=", dashboard_text)
-            self.assertNotIn("HOTPOT_ADMIN_TOKEN=", dashboard_text)
+            self.assertIn("HOTPOT_DASHBOARD_INSTANCES=", dashboard_text)
+            self.assertIn("HOTPOT_CLOUDFLARE_TARGETS=", dashboard_text)
+            self.assertIn(
+                "HOTPOT_ADMIN_TOKEN=legacy-admin-super-secret", dashboard_text
+            )
             self.assertIn("HOTPOT_DASHBOARD_TOKEN=viewer-super-secret", dashboard_text)
 
             tokens = []
@@ -318,6 +323,75 @@ class QnapRegistryMigrationTests(unittest.TestCase):
             second = self._run(script, args)
             self.assertEqual(second.returncode, 0, second.stderr)
             self.assertIn("already appears to use HOTPOT_APP_REGISTRY", second.stdout)
+            self.assertIn("--retire-legacy", second.stdout)
+
+            retire_plan = self._run(
+                script,
+                [*args[:-1], "--retire-legacy"],
+            )
+            self.assertEqual(retire_plan.returncode, 0, retire_plan.stderr)
+            self.assertIn("legacy-retirement plan", retire_plan.stdout)
+            self.assertIn("PLAN ONLY", retire_plan.stdout)
+            self.assertNotIn("legacy-admin-super-secret", retire_plan.stdout)
+
+            retire = self._run(
+                script,
+                [*args[:-1], "--retire-legacy", "--apply"],
+            )
+            self.assertEqual(retire.returncode, 0, retire.stderr + retire.stdout)
+            self.assertIn("Legacy fallback retirement completed", retire.stdout)
+
+            retired_hotpot = hotpot_env.read_text(encoding="utf-8")
+            self.assertNotIn("HOTPOT_PROFILES=", retired_hotpot)
+            self.assertNotIn("HOTPOT_ADMIN_TOKEN=", retired_hotpot)
+            self.assertNotIn("HOTPOT_SMTP_PASSWORD_FILE=", retired_hotpot)
+
+            retired_dashboard = dashboard_env.read_text(encoding="utf-8")
+            self.assertIn(
+                "HOTPOT_APP_REGISTRY=/config/apps.toml", retired_dashboard
+            )
+            self.assertNotIn("HOTPOT_DASHBOARD_INSTANCES=", retired_dashboard)
+            self.assertNotIn("HOTPOT_CLOUDFLARE_TARGETS=", retired_dashboard)
+            self.assertNotIn("HOTPOT_ADMIN_TOKEN=", retired_dashboard)
+            self.assertIn(
+                "HOTPOT_DASHBOARD_TOKEN=viewer-super-secret",
+                retired_dashboard,
+            )
+            retired_compose = compose.read_text(encoding="utf-8")
+            self.assertNotIn("HOTPOT_INSTANCE_NAME:", retired_compose)
+            self.assertNotIn("HOTPOT_PROFILES:", retired_compose)
+
+            backups = list(
+                (root / "hotpot-migration-backups").glob(
+                    "*/migration-manifest.json"
+                )
+            )
+            self.assertEqual(len(backups), 2)
+
+    def test_retirement_refuses_to_run_before_registry_is_staged(self) -> None:
+        root_repo = Path(__file__).resolve().parents[1]
+        script = root_repo / "scripts" / "migrate_qnap_registry.py"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            compose, hotpot_env, dashboard_env, secrets_dir = self._fixture(root)
+            docker = self._docker(root, compose, hotpot_env, dashboard_env, secrets_dir)
+            result = self._run(
+                script,
+                [
+                    "--compose", str(compose),
+                    "--hotpot-env", str(hotpot_env),
+                    "--dashboard-env", str(dashboard_env),
+                    "--docker-bin", str(docker),
+                    "--retire-legacy",
+                    "--apply",
+                ],
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(
+                "requires an already staged app-registry deployment",
+                result.stderr,
+            )
+            self.assertFalse((root / "hotpot-apps.toml").exists())
 
     def test_missing_referenced_shared_secret_fails_before_writes(self) -> None:
         root_repo = Path(__file__).resolve().parents[1]

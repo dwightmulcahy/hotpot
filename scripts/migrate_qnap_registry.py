@@ -369,11 +369,13 @@ def _modify_core_block(
     registry: Path,
     secrets_dir: Path,
     per_service_secret_files: dict[str, str],
+    retire_legacy: bool,
 ) -> str:
     lines = block.splitlines(keepends=True)
-    lines = _remove_env_keys_from_block(
-        lines, {"HOTPOT_INSTANCE_NAME", "HOTPOT_PROFILES"}
-    )
+    if retire_legacy:
+        lines = _remove_env_keys_from_block(
+            lines, {"HOTPOT_INSTANCE_NAME", "HOTPOT_PROFILES"}
+        )
     environment = {"HOTPOT_APP_REGISTRY": "/config/apps.toml"}
     environment.update(per_service_secret_files)
     lines = _set_environment(lines, environment)
@@ -821,6 +823,7 @@ def _build_candidate(
     dashboard_env_text: str,
     discovery: Discovery,
     registry: Path,
+    retire_legacy: bool,
 ) -> Candidate:
     copied_secret_values = _shared_core_secret_values(
         hotpot_env_text, secrets_dir=discovery.secrets_dir
@@ -844,6 +847,7 @@ def _build_candidate(
             per_service_secret_files=_per_service_secret_env(
                 app, copied_secret_values
             ),
+            retire_legacy=retire_legacy,
         )
 
     if discovery.dashboard_service not in spans:
@@ -858,34 +862,52 @@ def _build_candidate(
     )
 
     compose_candidate = _replace_service_blocks(compose_text, replacements)
-    hotpot_remove = {
-        "HOTPOT_ADMIN_TOKEN",
-        "HOTPOT_ADMIN_TOKEN_FILE",
-        "HOTPOT_PROFILES",
-    }
-    for key in CORE_SHARED_SECRET_KEYS:
-        hotpot_remove.add(key)
-        hotpot_remove.add(f"{key}_FILE")
-    hotpot_candidate = _rewrite_env(
-        hotpot_env_text,
-        remove=hotpot_remove,
-        note=(
-            "App names, profiles and scoped credentials are now defined in "
-            "hotpot-apps.toml."
-        ),
-    )
-    dashboard_candidate = _rewrite_env(
-        dashboard_env_text,
-        remove={
+    if retire_legacy:
+        hotpot_remove = {
             "HOTPOT_ADMIN_TOKEN",
             "HOTPOT_ADMIN_TOKEN_FILE",
-            "HOTPOT_DASHBOARD_INSTANCES",
-            "HOTPOT_CLOUDFLARE_TARGETS",
-            "HOTPOT_APP_REGISTRY",
-        },
-        additions={"HOTPOT_APP_REGISTRY": "/config/apps.toml"},
-        note="Protected-app discovery now comes from hotpot-apps.toml.",
-    )
+            "HOTPOT_PROFILES",
+        }
+        for key in CORE_SHARED_SECRET_KEYS:
+            hotpot_remove.add(key)
+            hotpot_remove.add(f"{key}_FILE")
+        hotpot_candidate = _rewrite_env(
+            hotpot_env_text,
+            remove=hotpot_remove,
+            note=(
+                "Legacy shared credentials/profiles retired after the "
+                "app-registry cutover."
+            ),
+        )
+        dashboard_candidate = _rewrite_env(
+            dashboard_env_text,
+            remove={
+                "HOTPOT_ADMIN_TOKEN",
+                "HOTPOT_ADMIN_TOKEN_FILE",
+                "HOTPOT_DASHBOARD_INSTANCES",
+                "HOTPOT_CLOUDFLARE_TARGETS",
+                "HOTPOT_APP_REGISTRY",
+            },
+            additions={"HOTPOT_APP_REGISTRY": "/config/apps.toml"},
+            note=(
+                "Legacy instance/Cloudflare/admin fallbacks retired after "
+                "the app-registry cutover."
+            ),
+        )
+    else:
+        # Stage one deliberately keeps the legacy settings in place. New images
+        # prefer the registry/scoped credentials, while old images can still
+        # restart during the cutover. Retirement is a separate explicit phase.
+        hotpot_candidate = hotpot_env_text
+        dashboard_candidate = _rewrite_env(
+            dashboard_env_text,
+            remove={"HOTPOT_APP_REGISTRY"},
+            additions={"HOTPOT_APP_REGISTRY": "/config/apps.toml"},
+            note=(
+                "App-registry cutover staged; legacy fallbacks remain until "
+                "--retire-legacy is applied."
+            ),
+        )
     return Candidate(
         compose=compose_candidate,
         hotpot_env=hotpot_candidate,
@@ -1051,6 +1073,7 @@ def _print_plan(
     discovery: Discovery,
     candidate: Candidate,
     *,
+    retire_legacy: bool,
     compose: Path,
     hotpot_env: Path,
     dashboard_env: Path,
@@ -1059,7 +1082,11 @@ def _print_plan(
     before_hotpot_env: str,
     before_dashboard_env: str,
 ) -> None:
-    print("Hotpot QNAP app-registry migration plan")
+    print(
+        "Hotpot QNAP legacy-retirement plan"
+        if retire_legacy
+        else "Hotpot QNAP app-registry migration plan"
+    )
     print(f"  compose:       {compose}")
     print(f"  hotpot env:    {hotpot_env}")
     print(f"  dashboard env: {dashboard_env}")
@@ -1082,6 +1109,11 @@ def _print_plan(
             + " into each app's scoped secret directory"
         )
     print("  restart policy: none; this tool only changes configuration")
+    if not retire_legacy:
+        print(
+            "  compatibility:  legacy admin/profile/instance settings are kept "
+            "for rollback until --retire-legacy"
+        )
 
     _print_diff(
         str(compose),
@@ -1249,6 +1281,14 @@ def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
         help="Atomically replace the current config after backup and validation.",
     )
     parser.add_argument(
+        "--retire-legacy",
+        action="store_true",
+        help=(
+            "After a verified registry rollout, remove legacy shared-admin, "
+            "profile, instance-list and Cloudflare fallback settings."
+        ),
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         help="Rebuild candidates even when the deployment already appears migrated.",
@@ -1281,12 +1321,22 @@ def main(argv: list[str] | None = None) -> int:
         dashboard_env_text = _read_text(dashboard_env, "dashboard env file")
         config = _compose_config(compose, args.docker_bin)
 
-        if _already_migrated(config, registry) and not args.force:
+        migrated = _already_migrated(config, registry)
+        if migrated and not args.retire_legacy and not args.force:
             print(
                 "Hotpot already appears to use HOTPOT_APP_REGISTRY for all cores "
                 f"and the dashboard. Registry: {registry}"
             )
+            print(
+                "After verifying the new images, preview legacy cleanup with "
+                "--retire-legacy."
+            )
             return 0
+        if args.retire_legacy and not migrated:
+            raise MigrationError(
+                "--retire-legacy requires an already staged app-registry "
+                "deployment. Run the normal migration first."
+            )
 
         discovery = _discover(
             config, requested_secrets_dir=requested_secrets
@@ -1297,12 +1347,14 @@ def main(argv: list[str] | None = None) -> int:
             dashboard_env_text=dashboard_env_text,
             discovery=discovery,
             registry=registry,
+            retire_legacy=args.retire_legacy,
         )
 
         _validate_compose_text(compose, candidate.compose, args.docker_bin)
         _print_plan(
             discovery,
             candidate,
+            retire_legacy=args.retire_legacy,
             compose=compose,
             hotpot_env=hotpot_env,
             dashboard_env=dashboard_env,
@@ -1329,20 +1381,47 @@ def main(argv: list[str] | None = None) -> int:
             backup_root=backup_root,
             docker_bin=args.docker_bin,
         )
-        print("\n✓ Configuration migration completed.")
-        print(f"  backup: {backup_dir}")
-        print("  containers were NOT restarted.")
-        print("\nNext:")
-        print(
-            f"  scripts/qnap-upgrade.sh --compose {compose} --dry-run"
-        )
-        print(
-            f"  scripts/qnap-upgrade.sh --compose {compose}"
-        )
-        print(
-            "Then verify Deployment and Policy in the dashboard before removing "
-            "the backup."
-        )
+        if args.retire_legacy:
+            print("\n✓ Legacy fallback retirement completed.")
+            print(f"  backup: {backup_dir}")
+            print("  containers were NOT restarted.")
+            print("\nNext:")
+            print(
+                f"  scripts/qnap-upgrade.sh --compose {compose} --dry-run"
+            )
+            print(
+                f"  scripts/qnap-upgrade.sh --compose {compose}"
+            )
+            print(
+                "Then verify Deployment and Policy again. The shared legacy "
+                "admin credential is no longer configured after that recreation."
+            )
+        else:
+            print("\n✓ App-registry migration staged.")
+            print(f"  backup: {backup_dir}")
+            print("  containers were NOT restarted.")
+            print(
+                "  legacy fallback settings were intentionally retained for "
+                "rollback compatibility."
+            )
+            print("\nNext:")
+            print(
+                f"  scripts/qnap-upgrade.sh --compose {compose} --dry-run"
+            )
+            print(
+                f"  scripts/qnap-upgrade.sh --compose {compose}"
+            )
+            print(
+                "After the new cores/dashboard are healthy and Policy is in sync, "
+                "preview cleanup with:"
+            )
+            print(
+                "  scripts/migrate_qnap_registry.py --retire-legacy"
+            )
+            print(
+                "Then apply that cleanup with --retire-legacy --apply and run "
+                "the controlled rollout once more."
+            )
         return 0
     except MigrationError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
