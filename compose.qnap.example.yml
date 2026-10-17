@@ -5,6 +5,10 @@
 #   - protected applications already listen on host ports
 #   - Hotpot should be inserted between cloudflared and those existing ports
 #
+# Add one hotpot-<instance-id> service per protected application. The two
+# services below are examples only; rename them and change ports/upstreams to
+# match your deployment.
+#
 # Unlike compose.cloudflare.example.yml, this does not create Docker bridge
 # networks or move the protected applications into this Compose project.
 #
@@ -31,21 +35,21 @@ services:
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
 
-  hotpot-monkeyhead:
+  hotpot-app-one:
     image: dwightmulcahy/hotpot:${HOTPOT_IMAGE_TAG:-latest}
-    container_name: hotpot-monkeyhead
+    container_name: hotpot-app-one
     restart: unless-stopped
     network_mode: host
     user: "1000:100"
     env_file:
       - /share/Data/config/cloudflared/hotpot.env
     environment:
-      HOTPOT_INSTANCE_ID: monkeyhead
-      HOTPOT_INSTANCE_NAME: Monkey Head Brewing
-      HOTPOT_PORT: "18088"
-      HOTPOT_UPSTREAM: "http://127.0.0.1:8088"
+      HOTPOT_INSTANCE_ID: app-one
+      HOTPOT_INSTANCE_NAME: Example App One
+      HOTPOT_PORT: "18081"
+      HOTPOT_UPSTREAM: "http://127.0.0.1:8081"
     volumes:
-      - /share/Data/config/cloudflared/hotpot-data/monkeyhead:/data
+      - /share/Data/config/cloudflared/hotpot-data/app-one:/data
       - /share/Data/config/cloudflared/secrets:/run/secrets:ro
     read_only: true
     tmpfs:
@@ -57,100 +61,21 @@ services:
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
 
-  hotpot-watersolver:
+  hotpot-app-two:
     image: dwightmulcahy/hotpot:${HOTPOT_IMAGE_TAG:-latest}
-    container_name: hotpot-watersolver
+    container_name: hotpot-app-two
     restart: unless-stopped
     network_mode: host
     user: "1000:100"
     env_file:
       - /share/Data/config/cloudflared/hotpot.env
     environment:
-      HOTPOT_INSTANCE_ID: watersolver
-      HOTPOT_INSTANCE_NAME: Brew Water Solver
-      HOTPOT_PORT: "12120"
-      HOTPOT_UPSTREAM: "http://127.0.0.1:2120"
+      HOTPOT_INSTANCE_ID: app-two
+      HOTPOT_INSTANCE_NAME: Example App Two
+      HOTPOT_PORT: "18082"
+      HOTPOT_UPSTREAM: "http://127.0.0.1:8082"
     volumes:
-      - /share/Data/config/cloudflared/hotpot-data/watersolver:/data
-      - /share/Data/config/cloudflared/secrets:/run/secrets:ro
-    read_only: true
-    tmpfs:
-      - /tmp:size=16m,mode=1777
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    labels:
-      - "com.centurylinklabs.watchtower.enable=true"
-
-  hotpot-hvac:
-    image: dwightmulcahy/hotpot:${HOTPOT_IMAGE_TAG:-latest}
-    container_name: hotpot-hvac
-    restart: unless-stopped
-    network_mode: host
-    user: "1000:100"
-    env_file:
-      - /share/Data/config/cloudflared/hotpot.env
-    environment:
-      HOTPOT_INSTANCE_ID: hvac
-      HOTPOT_INSTANCE_NAME: HVAC
-      HOTPOT_PORT: "18080"
-      HOTPOT_UPSTREAM: "http://127.0.0.1:8080"
-    volumes:
-      - /share/Data/config/cloudflared/hotpot-data/hvac:/data
-      - /share/Data/config/cloudflared/secrets:/run/secrets:ro
-    read_only: true
-    tmpfs:
-      - /tmp:size=16m,mode=1777
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    labels:
-      - "com.centurylinklabs.watchtower.enable=true"
-
-  hotpot-tapmenu:
-    image: dwightmulcahy/hotpot:${HOTPOT_IMAGE_TAG:-latest}
-    container_name: hotpot-tapmenu
-    restart: unless-stopped
-    network_mode: host
-    user: "1000:100"
-    env_file:
-      - /share/Data/config/cloudflared/hotpot.env
-    environment:
-      HOTPOT_INSTANCE_ID: tapmenu
-      HOTPOT_INSTANCE_NAME: Tap Menu
-      HOTPOT_PORT: "18111"
-      HOTPOT_UPSTREAM: "http://127.0.0.1:8111"
-    volumes:
-      - /share/Data/config/cloudflared/hotpot-data/tapmenu:/data
-      - /share/Data/config/cloudflared/secrets:/run/secrets:ro
-    read_only: true
-    tmpfs:
-      - /tmp:size=16m,mode=1777
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    labels:
-      - "com.centurylinklabs.watchtower.enable=true"
-
-  hotpot-password-lab:
-    image: dwightmulcahy/hotpot:${HOTPOT_IMAGE_TAG:-latest}
-    container_name: hotpot-password-lab
-    restart: unless-stopped
-    network_mode: host
-    user: "1000:100"
-    env_file:
-      - /share/Data/config/cloudflared/hotpot.env
-    environment:
-      HOTPOT_INSTANCE_ID: password-lab
-      HOTPOT_INSTANCE_NAME: Password Strength Lab
-      HOTPOT_PORT: "18089"
-      HOTPOT_UPSTREAM: "http://127.0.0.1:18081"
-      HOTPOT_PROFILES: "wordpress,secrets,git,php,generic,spring,containers,devops,observability,cms,appliances,password_lab"
-    volumes:
-      - /share/Data/config/cloudflared/hotpot-data/password-lab:/data
+      - /share/Data/config/cloudflared/hotpot-data/app-two:/data
       - /share/Data/config/cloudflared/secrets:/run/secrets:ro
     read_only: true
     tmpfs:
@@ -204,12 +129,10 @@ services:
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
 
-# With the shared hotpot.env example, update Cloudflare Tunnel routes so the
-# public hostnames point to the Hotpot listener ports rather than directly to
-# the applications, for example:
+# Update Cloudflare Tunnel routes so each public hostname points to its Hotpot
+# listener rather than directly to the protected application, for example:
 #
-#   www.example-one.com          -> http://localhost:18088
-#   www.example-two.com          -> http://localhost:12120
-#   passwordlab.dwights.dev      -> http://localhost:18089
+#   app-one.example.com          -> http://localhost:18081
+#   app-two.example.com          -> http://localhost:18082
 #
 # Hotpot then forwards normal traffic to the existing upstream ports above.

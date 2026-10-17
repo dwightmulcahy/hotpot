@@ -12,8 +12,10 @@ class QnapUpgradeTests(unittest.TestCase):
         self.assertIn("config -q", script)
         self.assertIn("--force-recreate", script)
         self.assertIn("wait_for_health", script)
-        self.assertIn('DASHBOARD_SERVICE="hotpot-dashboard"', script)
+        self.assertIn('DASHBOARD_SERVICE="${HOTPOT_QNAP_DASHBOARD_SERVICE:-hotpot-dashboard}"', script)
+        self.assertIn("config --services", script)
         self.assertIn("for service in $CORE_SERVICES", script)
+        self.assertIn(".State.Health.Status", script)
         self.assertIn('compose up -d --no-deps --force-recreate "$DASHBOARD_SERVICE"', script)
         self.assertNotIn("\ndocker compose down", script)
         self.assertNotIn("\ncompose down", script)
@@ -23,7 +25,7 @@ class QnapUpgradeTests(unittest.TestCase):
     def test_qnap_example_supports_immutable_hotpot_image_tag(self) -> None:
         root = Path(__file__).resolve().parents[1]
         compose = (root / "compose.qnap.example.yml").read_text(encoding="utf-8")
-        self.assertGreaterEqual(compose.count("${HOTPOT_IMAGE_TAG:-latest}"), 5)
+        self.assertGreaterEqual(compose.count("${HOTPOT_IMAGE_TAG:-latest}"), 3)
         self.assertIn("immutable release tag", compose)
 
     def test_upgrade_documentation_calls_out_dry_run_and_rollback(self) -> None:
@@ -40,6 +42,21 @@ class QnapUpgradeTests(unittest.TestCase):
         self.assertIn("HOTPOT_DASHBOARD_COMPOSE_FILE=", env)
         self.assertIn("HOTPOT_DASHBOARD_DEPLOY_TAG=", env)
         self.assertIn("HOTPOT_DASHBOARD_DEPLOY_SERVICES=", env)
+
+
+    def test_public_deployment_examples_use_generic_placeholders(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        compose = (root / "compose.qnap.example.yml").read_text(encoding="utf-8")
+        env = (root / "dashboard.env.example").read_text(encoding="utf-8")
+        deployment = (root / "dashboard" / "deployment.py").read_text(encoding="utf-8")
+
+        self.assertIn("hotpot-app-one:", compose)
+        self.assertIn("hotpot-app-two:", compose)
+        self.assertIn("app-one.example.com", compose)
+        self.assertIn('"id":"app-one"', env)
+        self.assertIn('"id":"app-two"', env)
+        self.assertIn("f\"hotpot-{instance.instance_id}\"", deployment)
+        self.assertNotIn("DEFAULT_SERVICES =", deployment)
 
 
 if __name__ == "__main__":

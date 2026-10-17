@@ -21,12 +21,18 @@ class GeoIPUpdateConfigTests(unittest.TestCase):
     def test_qnap_compose_mounts_file_backed_secrets_read_only(self):
         root = Path(__file__).resolve().parents[1]
         compose = (root / "compose.qnap.example.yml").read_text(encoding="utf-8")
-        self.assertGreaterEqual(
-            compose.count(
-                "/share/Data/config/cloudflared/secrets:/run/secrets:ro"
-            ),
-            5,
-        )
+        secret_mount = "/share/Data/config/cloudflared/secrets:/run/secrets:ro"
+        hotpot_sections = [
+            section
+            for section in compose.split("\n\n")
+            if any(
+                line.startswith("  hotpot-") and line.endswith(":")
+                for line in section.splitlines()
+            )
+        ]
+        self.assertGreaterEqual(len(hotpot_sections), 2)
+        for section in hotpot_sections:
+            self.assertIn(secret_mount, section)
         self.assertIn("cloudflare/cloudflared:2026.7.1@sha256:", compose)
 
     def test_geoipupdate_example_downloads_asn_and_city_daily(self):
