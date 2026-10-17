@@ -55,14 +55,16 @@ class SupplyChainTests(unittest.TestCase):
         self.assertIn("version-update:semver-minor", config)
         self.assertIn("version-update:semver-major", config)
 
-    def test_ci_runs_on_every_branch_and_gates_releases(self) -> None:
+    def test_ci_avoids_duplicate_pr_runs_and_gates_releases(self) -> None:
         root = Path(__file__).resolve().parents[1]
         ci = (root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         release = (root / ".github" / "workflows" / "docker-publish.yml").read_text(
             encoding="utf-8"
         )
 
-        self.assertIn('branches:\n      - "**"', ci)
+        self.assertIn("push:\n    branches:\n      - main", ci)
+        self.assertIn("pull_request:", ci)
+        self.assertNotIn('branches:\n      - "**"', ci)
         self.assertIn("workflow_call:", ci)
         self.assertIn("name: Ruff and Pyflakes", ci)
         self.assertIn("python -m ruff check --select F hotpot dashboard tests .github/scripts", ci)
