@@ -84,6 +84,19 @@ only as a migration fallback when the labels are not present. Explicit
 `--services`, `--dashboard-service`, `HOTPOT_QNAP_CORE_SERVICES`, and
 `HOTPOT_QNAP_DASHBOARD_SERVICE` overrides remain available.
 
+## Rehearse the migration on a local QNAP snapshot
+
+Before changing the NAS, copy the QNAP config tree to a workstation and run:
+
+```sh
+python3 scripts/migrate_qnap_registry.py \
+  --snapshot-root ~/Projects/hotpot-qnap-migrated
+```
+
+Add `--apply` to mutate only that local working copy. Snapshot mode preserves the original QNAP paths in the reviewed Compose file, remaps them only inside temporary `docker compose config` validation files, refuses writes outside the snapshot, and never starts/stops/restarts containers.
+
+See [App registry and multi-app deployment](app-registry.md#reviewing-a-qnap-migration-completely-offline) for the full rsync/copy/review workflow.
+
 ## Migrate an existing legacy QNAP configuration
 
 For an existing deployment, use the registry migration helper before the rollout

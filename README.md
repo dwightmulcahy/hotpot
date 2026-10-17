@@ -399,6 +399,10 @@ migration helper:
 ```bash
 python3 scripts/migrate_qnap_registry.py          # preview only
 python3 scripts/migrate_qnap_registry.py --apply  # back up + stage migration
+
+# Rehearse against a copied QNAP config tree without touching the NAS:
+python3 scripts/migrate_qnap_registry.py \
+  --snapshot-root ~/Projects/hotpot-qnap-migrated
 ```
 
 After the registry-aware images are verified, use `--retire-legacy` to preview and

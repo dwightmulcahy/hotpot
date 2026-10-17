@@ -193,6 +193,25 @@ class QnapUpgradeTests(unittest.TestCase):
         self.assertIn("migrate_qnap_registry.py", readme)
         self.assertIn("preview only", readme)
 
+    def test_snapshot_runbook_documents_offline_review_safety(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        app_registry = (root / "docs" / "app-registry.md").read_text(
+            encoding="utf-8"
+        )
+        qnap = (root / "docs" / "QNAP_UPGRADES.md").read_text(
+            encoding="utf-8"
+        )
+        readme = (root / "README.md").read_text(encoding="utf-8")
+
+        self.assertIn("--snapshot-root", app_registry)
+        self.assertIn("hotpot-qnap-original", app_registry)
+        self.assertIn("hotpot-qnap-migrated", app_registry)
+        self.assertIn("keeps the real QNAP paths", app_registry)
+        self.assertIn("output path outside the snapshot is rejected", app_registry)
+        self.assertIn("Do not blindly `git add .`", app_registry)
+        self.assertIn("never starts/stops/restarts containers", qnap)
+        self.assertIn("--snapshot-root", readme)
+
     def test_public_deployment_examples_use_generic_placeholders(self) -> None:
         root = Path(__file__).resolve().parents[1]
         compose = (root / "compose.qnap.example.yml").read_text(encoding="utf-8")

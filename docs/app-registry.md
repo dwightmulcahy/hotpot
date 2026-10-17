@@ -145,6 +145,58 @@ That preserves both views:
 
 Separate traffic plane, centralized intelligence.
 
+## Reviewing a QNAP migration completely offline
+
+The migration can be exercised against a local copy of `/share/Data/config/cloudflared` before any live QNAP file is changed.
+
+Copy the configuration tree to an untouched local directory. The trailing slash on the remote source is intentional:
+
+```sh
+mkdir -p ~/Projects/hotpot-qnap-original
+rsync -av \
+  USER@QNAP_HOST:/share/Data/config/cloudflared/ \
+  ~/Projects/hotpot-qnap-original/
+```
+
+Hotpot event databases and GeoIP data are not required for this configuration migration. They may be excluded if large, but keep every Compose/env file and the `secrets/` tree referenced by the deployment.
+
+Make a disposable working copy:
+
+```sh
+cp -a ~/Projects/hotpot-qnap-original ~/Projects/hotpot-qnap-migrated
+```
+
+From the Hotpot repository, preview the migration:
+
+```sh
+python3 scripts/migrate_qnap_registry.py \
+  --snapshot-root ~/Projects/hotpot-qnap-migrated
+```
+
+`--snapshot-root` means that local directory represents `/share/Data/config/cloudflared`. For Compose validation only, the script creates temporary files where QNAP absolute paths are remapped into the snapshot. The actual reviewed `docker-compose.yml` keeps the real QNAP paths, such as `/share/Data/config/cloudflared/hotpot-apps.toml`, so it remains suitable for copying back to the NAS.
+
+Preview mode is read-only. To apply the migration only to the working copy:
+
+```sh
+python3 scripts/migrate_qnap_registry.py \
+  --snapshot-root ~/Projects/hotpot-qnap-migrated \
+  --apply
+```
+
+Snapshot apply is fail-closed: Compose/env/registry/backups/scoped secrets must all stay under `--snapshot-root`. An output path outside the snapshot is rejected. The only Docker action used is `docker compose config`; snapshot mode never runs `up`, `down`, `pull`, `restart`, `stop`, or other lifecycle commands.
+
+Compare the trees with:
+
+```sh
+diff -ru ~/Projects/hotpot-qnap-original ~/Projects/hotpot-qnap-migrated
+```
+
+Or initialize Git in the working copy for review. **Do not blindly `git add .`**: copied secrets and legacy env files can contain real production credentials. The terminal diff is redacted, but the snapshot files themselves intentionally contain the real values needed to faithfully rehearse the NAS configuration.
+
+If the live QNAP config root is different, use `--qnap-config-root /your/qnap/config/path` together with `--snapshot-root`.
+
+After local review, still run the migration on the NAS in preview mode before applying it; the live files may have changed since the snapshot was copied.
+
 ## Migrating an existing QNAP deployment
 
 The repository includes `scripts/migrate_qnap_registry.py` specifically for an
