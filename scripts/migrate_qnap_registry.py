@@ -218,8 +218,9 @@ def _validation_context(text: str, detail: str) -> str:
     rendered = []
     for number in range(start, stop + 1):
         marker = ">" if number == line_number else " "
+        safe_line = _redact_text(lines[number - 1]).rstrip("\n")
         rendered.append(
-            f"{marker} {number:>{width}} | {lines[number - 1]}"
+            f"{marker} {number:>{width}} | {safe_line}"
         )
         if number == line_number and column > 0:
             rendered.append(
@@ -229,7 +230,7 @@ def _validation_context(text: str, detail: str) -> str:
                 + " " * max(column - 1, 0)
                 + "^"
             )
-    return _redact_text("\n".join(rendered))
+    return "\n".join(rendered)
 
 
 def _validate_compose_text(
