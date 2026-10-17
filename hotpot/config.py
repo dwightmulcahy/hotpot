@@ -4,6 +4,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from hotpot_common.app_registry import RegistryApp, load_app_registry
+
 
 def env_bool(name: str, default: bool) -> bool:
     value = os.getenv(name)
@@ -16,6 +18,14 @@ def env_csv(name: str, default: str = "") -> tuple[str, ...]:
     return tuple(v.strip() for v in os.getenv(name, default).split(",") if v.strip())
 
 
+def _file_secret(path: str, *, label: str) -> str | None:
+    try:
+        value = Path(path).read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise RuntimeError(f"Could not read {label}: {exc}") from exc
+    return value or None
+
+
 def env_secret(name: str) -> str | None:
     """Read a secret from NAME_FILE when configured, otherwise from NAME.
 
@@ -26,11 +36,7 @@ def env_secret(name: str) -> str | None:
 
     file_name = os.getenv(f"{name}_FILE", "").strip()
     if file_name:
-        try:
-            value = Path(file_name).read_text(encoding="utf-8").strip()
-        except OSError as exc:
-            raise RuntimeError(f"Could not read {name}_FILE: {exc}") from exc
-        return value or None
+        return _file_secret(file_name, label=f"{name}_FILE")
     return os.getenv(name, "").strip() or None
 
 
@@ -78,9 +84,49 @@ class Settings:
         upstream = os.getenv("HOTPOT_UPSTREAM", "").rstrip("/")
         if not upstream:
             raise RuntimeError("HOTPOT_UPSTREAM is required, e.g. http://myapp:8080")
-        profiles = env_csv("HOTPOT_PROFILES", "wordpress,secrets,git,php,generic")
         instance_id = os.getenv("HOTPOT_INSTANCE_ID", "hotpot").strip() or "hotpot"
-        instance_name = os.getenv("HOTPOT_INSTANCE_NAME", instance_id).strip() or instance_id
+        registry_app: RegistryApp | None = None
+        registry_path = os.getenv("HOTPOT_APP_REGISTRY", "").strip()
+        if registry_path:
+            registry = load_app_registry(registry_path)
+            registry_app = registry.by_id().get(instance_id)
+            if registry_app is None:
+                raise RuntimeError(
+                    f"HOTPOT_INSTANCE_ID {instance_id!r} is not present in app registry"
+                )
+            if not registry_app.profiles:
+                raise RuntimeError(
+                    f"App registry entry {instance_id!r} must define at least one profile"
+                )
+            profiles = registry_app.profiles
+            instance_name_default = registry_app.name
+        else:
+            profiles = env_csv(
+                "HOTPOT_PROFILES", "wordpress,secrets,git,php,generic"
+            )
+            instance_name_default = instance_id
+        instance_name = (
+            os.getenv("HOTPOT_INSTANCE_NAME", instance_name_default).strip()
+            or instance_name_default
+        )
+
+        collector_token = env_secret("HOTPOT_COLLECTOR_TOKEN")
+        policy_token = env_secret("HOTPOT_POLICY_TOKEN")
+        if registry_app is not None and registry_app.credentials is not None:
+            if collector_token is None:
+                collector_token = _file_secret(
+                    registry_app.credentials.collector_token_file,
+                    label=(
+                        f"collector token for registry app {registry_app.instance_id!r}"
+                    ),
+                )
+            if policy_token is None:
+                policy_token = _file_secret(
+                    registry_app.credentials.policy_token_file,
+                    label=(
+                        f"policy token for registry app {registry_app.instance_id!r}"
+                    ),
+                )
         return cls(
             bind=os.getenv("HOTPOT_BIND", "0.0.0.0"),
             port=int(os.getenv("HOTPOT_PORT", "8080")),
@@ -114,8 +160,8 @@ class Settings:
             smtp_password=env_secret("HOTPOT_SMTP_PASSWORD"),
             smtp_from=os.getenv("HOTPOT_SMTP_FROM") or None,
             smtp_to=env_csv("HOTPOT_SMTP_TO"),
-            collector_token=env_secret("HOTPOT_COLLECTOR_TOKEN"),
-            policy_token=env_secret("HOTPOT_POLICY_TOKEN"),
+            collector_token=collector_token,
+            policy_token=policy_token,
             instance_id=instance_id,
             instance_name=instance_name,
         )

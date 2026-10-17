@@ -189,6 +189,8 @@ hosts = ["WWW.Example.COM"]
         self.assertIn("requirements-core.txt", core_dockerfile)
         self.assertNotIn("requirements-dashboard.txt", core_dockerfile)
         self.assertIn("requirements-dashboard.txt", dashboard_dockerfile)
+        self.assertIn("COPY hotpot_common ./hotpot_common", core_dockerfile)
+        self.assertIn("COPY hotpot_common ./hotpot_common", dashboard_dockerfile)
 
 
 if __name__ == "__main__":

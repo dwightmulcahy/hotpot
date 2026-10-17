@@ -45,6 +45,108 @@ class CoreSecretFileTests(unittest.TestCase):
             self.assertEqual(settings.notify_webhook_bearer, "webhook-file")
             self.assertEqual(settings.smtp_password, "smtp-file")
 
+    def test_registry_controls_core_name_profiles_and_scoped_secret_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            collector = root / "collector"
+            policy = root / "policy"
+            collector.write_text("registry-read\n", encoding="utf-8")
+            policy.write_text("registry-write\n", encoding="utf-8")
+            registry = root / "apps.toml"
+            registry.write_text(
+                f"""
+[[apps]]
+id = "one"
+name = "Registry One"
+profiles = ["generic", "password_lab"]
+[apps.dashboard]
+url = "http://127.0.0.1:18001"
+[apps.credentials]
+collector_token_file = "{collector}"
+policy_token_file = "{policy}"
+""",
+                encoding="utf-8",
+            )
+            with patch.dict(
+                os.environ,
+                {
+                    "HOTPOT_UPSTREAM": "http://example:8080",
+                    "HOTPOT_INSTANCE_ID": "one",
+                    "HOTPOT_APP_REGISTRY": str(registry),
+                    "HOTPOT_PROFILES": "wordpress",
+                    "HOTPOT_INSTANCE_NAME": "",
+                    "HOTPOT_COLLECTOR_TOKEN": "",
+                    "HOTPOT_POLICY_TOKEN": "",
+                },
+                clear=True,
+            ):
+                settings = Settings.from_env()
+        self.assertEqual(settings.instance_name, "Registry One")
+        self.assertEqual(settings.enabled_profiles, ("generic", "password_lab"))
+        self.assertEqual(settings.collector_token, "registry-read")
+        self.assertEqual(settings.policy_token, "registry-write")
+
+    def test_registry_mode_fails_when_core_instance_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = Path(tmp) / "apps.toml"
+            registry.write_text(
+                """
+[[apps]]
+id = "one"
+profiles = ["generic"]
+[apps.dashboard]
+url = "http://127.0.0.1:18001"
+""",
+                encoding="utf-8",
+            )
+            with patch.dict(
+                os.environ,
+                {
+                    "HOTPOT_UPSTREAM": "http://example:8080",
+                    "HOTPOT_INSTANCE_ID": "missing",
+                    "HOTPOT_APP_REGISTRY": str(registry),
+                },
+                clear=True,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "not present"):
+                    Settings.from_env()
+
+    def test_explicit_scoped_env_secret_overrides_registry_secret_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry_collector = root / "registry-collector"
+            registry_policy = root / "registry-policy"
+            registry_collector.write_text("registry-read\n", encoding="utf-8")
+            registry_policy.write_text("registry-write\n", encoding="utf-8")
+            registry = root / "apps.toml"
+            registry.write_text(
+                f"""
+[[apps]]
+id = "one"
+profiles = ["generic"]
+[apps.dashboard]
+url = "http://127.0.0.1:18001"
+[apps.credentials]
+collector_token_file = "{registry_collector}"
+policy_token_file = "{registry_policy}"
+""",
+                encoding="utf-8",
+            )
+            with patch.dict(
+                os.environ,
+                {
+                    "HOTPOT_UPSTREAM": "http://example:8080",
+                    "HOTPOT_INSTANCE_ID": "one",
+                    "HOTPOT_APP_REGISTRY": str(registry),
+                    "HOTPOT_COLLECTOR_TOKEN": "env-read",
+                    "HOTPOT_POLICY_TOKEN": "env-write",
+                },
+                clear=True,
+            ):
+                settings = Settings.from_env()
+        self.assertEqual(settings.collector_token, "env-read")
+        self.assertEqual(settings.policy_token, "env-write")
+
     def test_unreadable_secret_file_fails_closed(self) -> None:
         with patch.dict(
             os.environ,
