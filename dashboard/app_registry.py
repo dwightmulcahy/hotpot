@@ -19,6 +19,12 @@ class RegistryCloudflare:
 
 
 @dataclass(frozen=True)
+class RegistryCredentials:
+    collector_token_file: str
+    policy_token_file: str
+
+
+@dataclass(frozen=True)
 class RegistryApp:
     instance_id: str
     name: str
@@ -26,6 +32,7 @@ class RegistryApp:
     profiles: tuple[str, ...]
     service: str | None
     cloudflare: RegistryCloudflare | None
+    credentials: RegistryCredentials | None
 
 
 @dataclass(frozen=True)
@@ -96,6 +103,18 @@ def _clean_service(value: object, *, instance_id: str) -> str | None:
     return service
 
 
+def _clean_secret_path(value: object, *, instance_id: str, field: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        raise RuntimeError(f"App {instance_id!r} credentials.{field} is required")
+    path = Path(raw)
+    if not path.is_absolute():
+        raise RuntimeError(
+            f"App {instance_id!r} credentials.{field} must be an absolute path"
+        )
+    return str(path)
+
+
 def _clean_hosts(value: object, *, instance_id: str) -> tuple[str, ...]:
     if not isinstance(value, list) or not value:
         raise RuntimeError(
@@ -156,6 +175,31 @@ def _parse_app(value: object) -> RegistryApp:
         )
         cloudflare = RegistryCloudflare(zone_id=zone_id, hosts=hosts)
 
+    credentials_raw = raw.get("credentials")
+    credentials = None
+    if credentials_raw is not None:
+        credentials_table = _required_table(
+            credentials_raw, context=f"App {instance_id!r} credentials"
+        )
+        collector_token_file = _clean_secret_path(
+            credentials_table.get("collector_token_file"),
+            instance_id=instance_id,
+            field="collector_token_file",
+        )
+        policy_token_file = _clean_secret_path(
+            credentials_table.get("policy_token_file"),
+            instance_id=instance_id,
+            field="policy_token_file",
+        )
+        if collector_token_file == policy_token_file:
+            raise RuntimeError(
+                f"App {instance_id!r} collector and policy token files must differ"
+            )
+        credentials = RegistryCredentials(
+            collector_token_file=collector_token_file,
+            policy_token_file=policy_token_file,
+        )
+
     return RegistryApp(
         instance_id=instance_id,
         name=name,
@@ -163,6 +207,7 @@ def _parse_app(value: object) -> RegistryApp:
         profiles=profiles,
         service=service,
         cloudflare=cloudflare,
+        credentials=credentials,
     )
 
 
@@ -274,6 +319,7 @@ def registry_from_environment() -> AppRegistry:
                     profiles=(),
                     service=None,
                     cloudflare=cloudflare.get(instance_id),
+                    credentials=None,
                 )
             )
         return AppRegistry(apps=tuple(apps), source="legacy-environment")

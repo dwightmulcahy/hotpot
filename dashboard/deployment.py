@@ -206,6 +206,8 @@ async def _fetch_instance(dashboard: Any, instance: Any) -> dict[str, Any]:
             "shared_config_fingerprint": None,
             "policy_revision": None,
             "admin_token_source": "unknown",
+            "collector_token_source": "unknown",
+            "policy_token_source": "unknown",
         }
 
     deployment = status.get("deployment") if isinstance(status, dict) else None
@@ -261,6 +263,10 @@ async def _fetch_instance(dashboard: Any, instance: Any) -> dict[str, Any]:
         "policy_updated_at": deployment.get("policy_updated_at")
         or policy.get("updated_at"),
         "admin_token_source": str(secret_sources.get("admin_token") or "unknown"),
+        "collector_token_source": str(
+            secret_sources.get("collector_token") or "unset"
+        ),
+        "policy_token_source": str(secret_sources.get("policy_token") or "unset"),
         "config": deployment.get("config") if isinstance(deployment.get("config"), dict) else {},
     }
 

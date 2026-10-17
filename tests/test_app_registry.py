@@ -29,6 +29,10 @@ service = "security-gateway-one"
 zone_id = "zone-one"
 hosts = ["WWW.Example.COM.", "api.example.com", "www.example.com"]
 
+[apps.credentials]
+collector_token_file = "/run/secrets/app-one/collector_token"
+policy_token_file = "/run/secrets/app-one/policy_token"
+
 [[apps]]
 id = "password-lab"
 profiles = ["generic", "password_lab"]
@@ -53,6 +57,14 @@ class AppRegistryTests(unittest.TestCase):
         self.assertEqual(
             one.cloudflare.hosts,
             ("api.example.com", "www.example.com"),
+        )
+        self.assertEqual(
+            one.credentials.collector_token_file,
+            "/run/secrets/app-one/collector_token",
+        )
+        self.assertEqual(
+            one.credentials.policy_token_file,
+            "/run/secrets/app-one/policy_token",
         )
 
         password = registry.by_id()["password-lab"]
@@ -157,6 +169,50 @@ url = "http://one"
 """
         with self.assertRaisesRegex(RuntimeError, "profiles"):
             parse_app_registry(bad_profile)
+
+    def test_registry_rejects_incomplete_relative_or_reused_credentials(self) -> None:
+        cases = (
+            (
+                """
+[[apps]]
+id = "one"
+[apps.dashboard]
+url = "http://one"
+[apps.credentials]
+collector_token_file = "/run/secrets/collector"
+""",
+                "policy_token_file",
+            ),
+            (
+                """
+[[apps]]
+id = "one"
+[apps.dashboard]
+url = "http://one"
+[apps.credentials]
+collector_token_file = "relative/collector"
+policy_token_file = "/run/secrets/policy"
+""",
+                "absolute path",
+            ),
+            (
+                """
+[[apps]]
+id = "one"
+[apps.dashboard]
+url = "http://one"
+[apps.credentials]
+collector_token_file = "/run/secrets/same"
+policy_token_file = "/run/secrets/same"
+""",
+                "must differ",
+            ),
+        )
+        for raw, message in cases:
+            with self.subTest(message=message), self.assertRaisesRegex(
+                RuntimeError, message
+            ):
+                parse_app_registry(raw)
 
     def test_missing_registry_file_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

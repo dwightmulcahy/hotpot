@@ -44,7 +44,7 @@ def run_preflight(*, check_bind: bool = True) -> dict:
     """Validate dashboard configuration without making network calls or mutations."""
 
     checks: list[dict] = []
-    for name in ("HOTPOT_ADMIN_TOKEN", "HOTPOT_DASHBOARD_TOKEN"):
+    for name in ("HOTPOT_DASHBOARD_TOKEN",):
         try:
             value = secret_from_env(name, required=True)
             _check(checks, f"secret:{name}", bool(value), f"{name} is configured")
@@ -76,6 +76,49 @@ def run_preflight(*, check_bind: bool = True) -> dict:
             False,
             f"Dashboard instances are invalid: {type(exc).__name__}: {exc}",
         )
+
+    credential_errors: list[str] = []
+    try:
+        legacy_admin = secret_from_env("HOTPOT_ADMIN_TOKEN")
+    except Exception as exc:
+        legacy_admin = ""
+        credential_errors.append(
+            f"legacy admin credential unavailable: {type(exc).__name__}: {exc}"
+        )
+    if registry is not None:
+        for app in registry.apps:
+            if app.credentials is None:
+                if not legacy_admin:
+                    credential_errors.append(
+                        f"{app.instance_id}: no scoped credentials or legacy admin token"
+                    )
+                continue
+            for scope, path in (
+                ("collector", app.credentials.collector_token_file),
+                ("policy", app.credentials.policy_token_file),
+            ):
+                try:
+                    value = Path(path).read_text(encoding="utf-8").strip()
+                except OSError as exc:
+                    credential_errors.append(
+                        f"{app.instance_id}: {scope} token file unreadable ({type(exc).__name__})"
+                    )
+                    continue
+                if not value:
+                    credential_errors.append(
+                        f"{app.instance_id}: {scope} token file is empty"
+                    )
+    _check(
+        checks,
+        "core-credentials",
+        not credential_errors,
+        (
+            "Every configured app has collector and policy credentials"
+            if not credential_errors
+            else "Core credential configuration errors: "
+            + "; ".join(credential_errors)
+        ),
+    )
 
     data_dir = Path(os.getenv("HOTPOT_DASHBOARD_DATA_DIR", "/data"))
     try:

@@ -412,7 +412,8 @@ class PolicyManager:
         self,
         client: ClientSession,
         *,
-        token: str,
+        token: str | None = None,
+        token_for: Callable[[str], str] | None = None,
         force: bool = False,
     ) -> dict[str, Any]:
         now_mono = time.monotonic()
@@ -427,7 +428,14 @@ class PolicyManager:
             error = None
             attempted_at = _utcnow().isoformat()
             try:
-                headers = {"Authorization": f"Bearer {token}"}
+                current_token = (
+                    token_for(instance.instance_id) if token_for is not None else token
+                )
+                if not current_token:
+                    raise RuntimeError(
+                        f"no policy credential for {instance.instance_id}"
+                    )
+                headers = {"Authorization": f"Bearer {current_token}"}
                 async with client.get(
                     f"{instance.url}/_hotpot/api/policy", headers=headers
                 ) as response:

@@ -9,6 +9,33 @@ from dashboard.policy import PolicyManager
 from dashboard.runtime import Instance
 from hotpot.policy import snapshot_revision
 
+class _Response:
+    def __init__(self, status: int, payload: dict):
+        self.status = status
+        self.payload = payload
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def json(self, content_type=None):
+        return self.payload
+
+
+class _ScopedClient:
+    def __init__(self):
+        self.calls = []
+
+    def get(self, url, *, headers):
+        self.calls.append(("GET", url, headers["Authorization"]))
+        return _Response(200, {"revision": "stale"})
+
+    def put(self, url, *, headers, json):
+        self.calls.append(("PUT", url, headers["Authorization"]))
+        return _Response(200, {"policy": {"revision": json["revision"]}})
+
 
 class DashboardPolicyManagerTests(unittest.IsolatedAsyncioTestCase):
     def manager(self, path: Path) -> PolicyManager:
@@ -100,6 +127,26 @@ class DashboardPolicyManagerTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("bypass_deception", preview["impacts"])
             self.assertIn("suppress_notifications", preview["impacts"])
             self.assertIn("suppress_response_approval", preview["impacts"])
+
+    async def test_reconcile_uses_policy_token_for_each_instance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = self.manager(Path(tmp))
+            client = _ScopedClient()
+            report = await manager.reconcile(
+                client,
+                token_for=lambda instance_id: f"{instance_id}-policy",
+                force=True,
+            )
+            self.assertTrue(report["in_sync"], report)
+            by_app = {
+                "one": "Bearer one-policy",
+                "two": "Bearer two-policy",
+            }
+            self.assertEqual(len(client.calls), 4)
+            for method, url, authorization in client.calls:
+                instance_id = "one" if url.startswith("http://one/") else "two"
+                self.assertIn(method, {"GET", "PUT"})
+                self.assertEqual(authorization, by_app[instance_id])
 
     async def test_disable_preserves_audit_history(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

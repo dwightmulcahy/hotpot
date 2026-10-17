@@ -127,6 +127,82 @@ hosts = ["one.example.com"]
         cloudflare = next(row for row in report["checks"] if row["id"] == "cloudflare")
         self.assertIn("1 instance", cloudflare["detail"])
 
+    def test_dashboard_preflight_accepts_scoped_core_credentials_without_admin_token(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            collector = root / "collector"
+            policy = root / "policy"
+            collector.write_text("read-token\n", encoding="utf-8")
+            policy.write_text("write-token\n", encoding="utf-8")
+            registry = root / "apps.toml"
+            registry.write_text(
+                f"""
+[[apps]]
+id = "one"
+[apps.dashboard]
+url = "http://127.0.0.1:18088"
+[apps.credentials]
+collector_token_file = "{collector}"
+policy_token_file = "{policy}"
+""",
+                encoding="utf-8",
+            )
+            with patch.dict(
+                "os.environ",
+                {
+                    "HOTPOT_APP_REGISTRY": str(registry),
+                    "HOTPOT_ADMIN_TOKEN": "",
+                    "HOTPOT_DASHBOARD_TOKEN": "viewer-token",
+                    "HOTPOT_DASHBOARD_DATA_DIR": directory,
+                    "HOTPOT_CLOUDFLARE_ENFORCEMENT_ENABLED": "false",
+                    "HOTPOT_DASHBOARD_NOTIFICATIONS_ENABLED": "false",
+                },
+                clear=False,
+            ):
+                report = run_dashboard_preflight(check_bind=False)
+        self.assertTrue(report["ok"], report)
+        credentials = next(
+            row for row in report["checks"] if row["id"] == "core-credentials"
+        )
+        self.assertEqual(credentials["status"], "pass")
+
+    def test_dashboard_preflight_fails_when_scoped_credential_file_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            collector = root / "collector"
+            collector.write_text("read-token\n", encoding="utf-8")
+            registry = root / "apps.toml"
+            registry.write_text(
+                f"""
+[[apps]]
+id = "one"
+[apps.dashboard]
+url = "http://127.0.0.1:18088"
+[apps.credentials]
+collector_token_file = "{collector}"
+policy_token_file = "{root / 'missing-policy'}"
+""",
+                encoding="utf-8",
+            )
+            with patch.dict(
+                "os.environ",
+                {
+                    "HOTPOT_APP_REGISTRY": str(registry),
+                    "HOTPOT_ADMIN_TOKEN": "",
+                    "HOTPOT_DASHBOARD_TOKEN": "viewer-token",
+                    "HOTPOT_DASHBOARD_DATA_DIR": directory,
+                    "HOTPOT_CLOUDFLARE_ENFORCEMENT_ENABLED": "false",
+                    "HOTPOT_DASHBOARD_NOTIFICATIONS_ENABLED": "false",
+                },
+                clear=False,
+            ):
+                report = run_dashboard_preflight(check_bind=False)
+        self.assertFalse(report["ok"])
+        credentials = next(
+            row for row in report["checks"] if row["id"] == "core-credentials"
+        )
+        self.assertEqual(credentials["status"], "fail")
+
     def test_dashboard_preflight_fails_when_enforcement_has_no_targets(self) -> None:
         with tempfile.TemporaryDirectory() as directory, patch.dict(
             "os.environ",
