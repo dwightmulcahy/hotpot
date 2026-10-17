@@ -664,6 +664,46 @@ class QnapRegistryMigrationTests(unittest.TestCase):
                 any(forbidden.intersection(call) for call in calls)
             )
 
+    def test_generated_list_values_are_yaml_quoted(self) -> None:
+        root_repo = Path(__file__).resolve().parents[1]
+        script = root_repo / "scripts" / "migrate_qnap_registry.py"
+        text = script.read_text(encoding="utf-8")
+
+        self.assertIn(
+            "json.dumps(f'{key}={value}')",
+            text,
+        )
+        self.assertIn(
+            'kept.append(f"      - {json.dumps(item)}\\n")',
+            text,
+        )
+
+    def test_validation_context_redacts_secret_values(self) -> None:
+        root_repo = Path(__file__).resolve().parents[1]
+        sys.path.insert(0, str(root_repo / "scripts"))
+        try:
+            import migrate_qnap_registry as migration
+
+            source = "\n".join(
+                [
+                    "services:",
+                    "  app:",
+                    "    environment:",
+                    "      HOTPOT_ADMIN_TOKEN: very-secret",
+                    "      SAFE_VALUE: ok",
+                ]
+            )
+            rendered = migration._validation_context(
+                source,
+                "scanner failure at L4.C28",
+            )
+            self.assertIn("4 |", rendered)
+            self.assertIn("<redacted>", rendered)
+            self.assertNotIn("very-secret", rendered)
+        finally:
+            sys.modules.pop("migrate_qnap_registry", None)
+            sys.path.remove(str(root_repo / "scripts"))
+
     def test_snapshot_mode_refuses_output_paths_outside_snapshot(self) -> None:
         root_repo = Path(__file__).resolve().parents[1]
         script = root_repo / "scripts" / "migrate_qnap_registry.py"

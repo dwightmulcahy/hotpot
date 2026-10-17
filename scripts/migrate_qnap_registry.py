@@ -199,6 +199,39 @@ def _compose_config(
     return payload
 
 
+def _validation_context(text: str, detail: str) -> str:
+    match = re.search(r"\\bL(\\d+)\\.C(\\d+)\\b", detail)
+    if not match:
+        match = re.search(r"\\bline\\s+(\\d+)(?::(\\d+))?", detail, re.IGNORECASE)
+    if not match:
+        return ""
+
+    line_number = int(match.group(1))
+    column = int(match.group(2) or 0)
+    lines = text.splitlines()
+    if line_number < 1 or line_number > len(lines):
+        return ""
+
+    start = max(1, line_number - 4)
+    stop = min(len(lines), line_number + 4)
+    width = len(str(stop))
+    rendered = []
+    for number in range(start, stop + 1):
+        marker = ">" if number == line_number else " "
+        rendered.append(
+            f"{marker} {number:>{width}} | {lines[number - 1]}"
+        )
+        if number == line_number and column > 0:
+            rendered.append(
+                "  "
+                + " " * width
+                + " | "
+                + " " * max(column - 1, 0)
+                + "^"
+            )
+    return _redact_text("\n".join(rendered))
+
+
 def _validate_compose_text(
     compose: Path,
     text: str,
@@ -206,8 +239,27 @@ def _validate_compose_text(
     mapping: PathMapping,
 ) -> None:
     candidate = _temporary_compose(compose, text, mapping)
+    local_text = mapping.remap_text_for_local(text)
     try:
-        _run([docker_bin, "compose", "-f", str(candidate), "config", "-q"])
+        result = _run(
+            [docker_bin, "compose", "-f", str(candidate), "config", "-q"],
+            check=False,
+        )
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip()
+            context = _validation_context(local_text, detail)
+            message = (
+                f"Command failed ({result.returncode}): "
+                f"{docker_bin} compose -f <temporary-candidate> config -q"
+            )
+            if detail:
+                message += f"\n{detail}"
+            if context:
+                message += (
+                    "\n\nGenerated Compose context (redacted):\n"
+                    + context
+                )
+            raise MigrationError(message)
     finally:
         candidate.unlink(missing_ok=True)
 
@@ -299,11 +351,20 @@ def _service_spans(text: str) -> dict[str, tuple[int, int]]:
 def _section_range(lines: list[str], name: str) -> tuple[int, int] | None:
     header = f"    {name}:"
     for index, line in enumerate(lines):
-        if line.rstrip().startswith(header):
-            for stop in range(index + 1, len(lines)):
-                if PROPERTY_RE.match(lines[stop]):
-                    return index, stop
-            return index, len(lines)
+        stripped = line.rstrip()
+        if not stripped.startswith(header):
+            continue
+        suffix = stripped[len(header) :].strip()
+        if suffix and not suffix.startswith(("#", "&")):
+            raise MigrationError(
+                f"Compose section {name!r} uses unsupported single-line or "
+                f"alias syntax: {stripped.strip()}. Convert it to block YAML "
+                "or report this form so the migrator can preserve it safely."
+            )
+        for stop in range(index + 1, len(lines)):
+            if PROPERTY_RE.match(lines[stop]):
+                return index, stop
+        return index, len(lines)
     return None
 
 
@@ -341,7 +402,10 @@ def _set_environment(lines: list[str], values: dict[str, str]) -> list[str]:
     content = lines[start + 1 : stop]
     list_style = any(line.startswith("      - ") for line in content if line.strip())
     additions = (
-        [f"      - {key}={value}\n" for key, value in values.items()]
+        [
+            f"      - {json.dumps(f'{key}={value}')}\n"
+            for key, value in values.items()
+        ]
         if list_style
         else [
             f"      {key}: {json.dumps(value)}\n"
@@ -378,7 +442,7 @@ def _set_volumes(
         while insert > 1 and not lines[insert - 1].strip():
             insert -= 1
         block = ["    volumes:\n"]
-        block.extend(f"      - {item}\n" for item in additions)
+        block.extend(f"      - {json.dumps(item)}\n" for item in additions)
         return lines[:insert] + block + lines[insert:]
 
     start, stop = section
@@ -396,7 +460,7 @@ def _set_volumes(
     existing = {line.strip()[2:].strip().strip('"').strip("'") for line in kept if line.strip().startswith("- ")}
     for item in additions:
         if item not in existing:
-            kept.append(f"      - {item}\n")
+            kept.append(f"      - {json.dumps(item)}\n")
     return lines[: start + 1] + kept + lines[stop:]
 
 
