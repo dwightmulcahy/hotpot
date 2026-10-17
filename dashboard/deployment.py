@@ -15,13 +15,7 @@ from .preflight import run_preflight
 
 DEPLOYMENT_REPORT_SCHEMA_VERSION = 1
 DEFAULT_COMPOSE_FILE = "/share/Data/config/cloudflared/docker-compose.yml"
-DEFAULT_SERVICES = (
-    "hotpot-monkeyhead",
-    "hotpot-watersolver",
-    "hotpot-hvac",
-    "hotpot-tapmenu",
-    "hotpot-dashboard",
-)
+DEFAULT_DASHBOARD_SERVICE = "hotpot-dashboard"
 
 
 def _known(value: Any) -> bool:
@@ -91,17 +85,28 @@ def _status_for_bool(
     return unknown
 
 
-def _upgrade_plan(build: dict[str, str]) -> dict[str, Any]:
+def _upgrade_plan(build: dict[str, str], dashboard: Any) -> dict[str, Any]:
     compose_file = (
         os.getenv("HOTPOT_DASHBOARD_COMPOSE_FILE", DEFAULT_COMPOSE_FILE).strip()
         or DEFAULT_COMPOSE_FILE
     )
     target_tag = os.getenv("HOTPOT_DASHBOARD_DEPLOY_TAG", "latest").strip() or "latest"
-    services = _csv("HOTPOT_DASHBOARD_DEPLOY_SERVICES", DEFAULT_SERVICES)
+    dashboard_service = (
+        os.getenv(
+            "HOTPOT_DASHBOARD_DEPLOY_DASHBOARD_SERVICE",
+            DEFAULT_DASHBOARD_SERVICE,
+        ).strip()
+        or DEFAULT_DASHBOARD_SERVICE
+    )
+    default_services = tuple(
+        f"hotpot-{instance.instance_id}" for instance in dashboard.instances
+    ) + (dashboard_service,)
+    services = _csv("HOTPOT_DASHBOARD_DEPLOY_SERVICES", default_services)
+
     quoted_file = shlex.quote(compose_file)
     quoted_tag = shlex.quote(target_tag)
     quoted_services = " ".join(shlex.quote(item) for item in services)
-    core_services = tuple(item for item in services if item != "hotpot-dashboard")
+    core_services = tuple(item for item in services if item != dashboard_service)
     steps = [
         {
             "id": "validate",
@@ -128,28 +133,35 @@ def _upgrade_plan(build: dict[str, str]) -> dict[str, Any]:
                 ),
             }
         )
-    if "hotpot-dashboard" in services:
+    if dashboard_service in services:
         steps.append(
             {
                 "id": "recreate-dashboard",
                 "label": "Recreate dashboard last",
                 "command": (
                     f"HOTPOT_IMAGE_TAG={quoted_tag} docker compose -f {quoted_file} "
-                    "up -d --no-deps --force-recreate hotpot-dashboard"
+                    f"up -d --no-deps --force-recreate {shlex.quote(dashboard_service)}"
                 ),
             }
         )
+
+    health_urls = [
+        f"{instance.url.rstrip('/')}/_hotpot/health"
+        for instance in dashboard.instances
+    ]
+    if dashboard_service in services:
+        dashboard_port = max(
+            1, int(os.getenv("HOTPOT_DASHBOARD_PORT", "19090") or "19090")
+        )
+        health_urls.append(f"http://127.0.0.1:{dashboard_port}/health")
+    verify_command = " && ".join(
+        f"curl -fsS {shlex.quote(url)}" for url in health_urls
+    )
     steps.append(
         {
             "id": "verify",
             "label": "Verify all health endpoints",
-            "command": (
-                "curl -fsS http://127.0.0.1:18088/_hotpot/health && "
-                "curl -fsS http://127.0.0.1:12120/_hotpot/health && "
-                "curl -fsS http://127.0.0.1:18080/_hotpot/health && "
-                "curl -fsS http://127.0.0.1:18111/_hotpot/health && "
-                "curl -fsS http://127.0.0.1:19090/health"
-            ),
+            "command": verify_command or "true",
         }
     )
     return {
@@ -157,6 +169,8 @@ def _upgrade_plan(build: dict[str, str]) -> dict[str, Any]:
         "target_tag": target_tag,
         "mutable_tag": target_tag == "latest",
         "services": list(services),
+        "dashboard_service": dashboard_service,
+        "health_urls": health_urls,
         "current_dashboard_build": build,
         "steps": steps,
     }
@@ -420,5 +434,5 @@ async def collect_deployment_report(dashboard: Any) -> dict[str, Any]:
         "preflight": preflight,
         "backups": backups,
         "policy_sync": policy_sync,
-        "upgrade_plan": _upgrade_plan(build),
+        "upgrade_plan": _upgrade_plan(build, dashboard),
     }
