@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import tomllib
@@ -198,3 +199,88 @@ def load_app_registry(path: str | Path | None = None) -> AppRegistry:
     except OSError as exc:
         raise RuntimeError(f"Could not read app registry {selected}: {exc}") from exc
     return parse_app_registry(raw, source=str(selected))
+
+
+def _legacy_cloudflare(raw: str) -> dict[str, RegistryCloudflare]:
+    raw = raw.strip()
+    if not raw:
+        return {}
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("HOTPOT_CLOUDFLARE_TARGETS must be valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("HOTPOT_CLOUDFLARE_TARGETS must be a JSON object")
+    result: dict[str, RegistryCloudflare] = {}
+    for instance_id, value in payload.items():
+        key = _clean_id(instance_id)
+        table = _required_table(
+            value, context=f"Cloudflare target {key!r}"
+        )
+        zone_id = str(table.get("zone_id") or "").strip()
+        if not zone_id:
+            raise RuntimeError(f"Cloudflare target {key!r} requires zone_id")
+        result[key] = RegistryCloudflare(
+            zone_id=zone_id,
+            hosts=_clean_hosts(table.get("hosts"), instance_id=key),
+        )
+    return result
+
+
+def registry_from_environment() -> AppRegistry:
+    """Load the registry, with legacy dashboard env as a migration fallback."""
+
+    configured = os.getenv("HOTPOT_APP_REGISTRY", "").strip()
+    if configured:
+        return load_app_registry(configured)
+
+    legacy_raw = os.getenv("HOTPOT_DASHBOARD_INSTANCES", "").strip()
+    if legacy_raw:
+        try:
+            values = json.loads(legacy_raw)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                "HOTPOT_DASHBOARD_INSTANCES must be valid JSON"
+            ) from exc
+        if not isinstance(values, list) or not values:
+            raise RuntimeError(
+                "HOTPOT_DASHBOARD_INSTANCES must be a non-empty JSON list"
+            )
+        cloudflare = _legacy_cloudflare(
+            os.getenv("HOTPOT_CLOUDFLARE_TARGETS", "")
+        )
+        apps: list[RegistryApp] = []
+        seen: set[str] = set()
+        for value in values:
+            table = _required_table(
+                value, context="Each dashboard instance"
+            )
+            instance_id = _clean_id(table.get("id"))
+            if instance_id in seen:
+                raise RuntimeError(f"Duplicate app id: {instance_id}")
+            seen.add(instance_id)
+            name = str(table.get("name") or instance_id).strip()
+            if not name:
+                raise RuntimeError(
+                    f"App {instance_id!r} name must not be blank"
+                )
+            apps.append(
+                RegistryApp(
+                    instance_id=instance_id,
+                    name=name,
+                    url=_clean_url(
+                        table.get("url"), instance_id=instance_id
+                    ),
+                    profiles=(),
+                    service=None,
+                    cloudflare=cloudflare.get(instance_id),
+                )
+            )
+        return AppRegistry(apps=tuple(apps), source="legacy-environment")
+
+    default_path = Path("/config/apps.toml")
+    if default_path.is_file():
+        return load_app_registry(default_path)
+    raise RuntimeError(
+        "Configure HOTPOT_APP_REGISTRY or legacy HOTPOT_DASHBOARD_INSTANCES"
+    )

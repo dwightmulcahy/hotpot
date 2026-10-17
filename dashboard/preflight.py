@@ -6,9 +6,8 @@ import tempfile
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from .cloudflare_enforcement import parse_cloudflare_targets
+from .app_registry import registry_from_environment
 from .notifications import NotificationConfig
-from .runtime import instances_from_env
 from .security import secret_from_env
 
 
@@ -52,21 +51,31 @@ def run_preflight(*, check_bind: bool = True) -> dict:
         except Exception as exc:
             _check(checks, f"secret:{name}", False, f"{name} is unavailable: {type(exc).__name__}: {exc}")
 
+    registry = None
     try:
-        instances = instances_from_env()
+        registry = registry_from_environment()
         invalid = []
-        for instance in instances:
-            parsed = urlsplit(instance.url)
+        for app in registry.apps:
+            parsed = urlsplit(app.url)
             if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-                invalid.append(instance.instance_id)
+                invalid.append(app.instance_id)
         _check(
             checks,
             "instances",
             not invalid,
-            f"Configured {len(instances)} dashboard instance(s)" if not invalid else "Invalid instance URL(s): " + ", ".join(invalid),
+            (
+                f"Configured {len(registry.apps)} dashboard instance(s) from {registry.source}"
+                if not invalid
+                else "Invalid instance URL(s): " + ", ".join(invalid)
+            ),
         )
     except Exception as exc:
-        _check(checks, "instances", False, f"Dashboard instances are invalid: {type(exc).__name__}: {exc}")
+        _check(
+            checks,
+            "instances",
+            False,
+            f"Dashboard instances are invalid: {type(exc).__name__}: {exc}",
+        )
 
     data_dir = Path(os.getenv("HOTPOT_DASHBOARD_DATA_DIR", "/data"))
     try:
@@ -90,21 +99,30 @@ def run_preflight(*, check_bind: bool = True) -> dict:
 
     enforcement_enabled = _env_bool("HOTPOT_CLOUDFLARE_ENFORCEMENT_ENABLED", False)
     try:
-        targets = parse_cloudflare_targets(os.getenv("HOTPOT_CLOUDFLARE_TARGETS", ""))
+        target_count = (
+            sum(1 for app in registry.apps if app.cloudflare is not None)
+            if registry is not None
+            else 0
+        )
         token = secret_from_env("HOTPOT_CLOUDFLARE_API_TOKEN")
-        cloudflare_ok = not enforcement_enabled or bool(token and targets)
+        cloudflare_ok = not enforcement_enabled or bool(token and target_count)
         _check(
             checks,
             "cloudflare",
             cloudflare_ok,
             (
-                f"Cloudflare target mapping parsed for {len(targets)} instance(s)"
+                f"Cloudflare target mapping parsed for {target_count} instance(s)"
                 if cloudflare_ok
                 else "Cloudflare enforcement is enabled but token or target mappings are missing"
             ),
         )
     except Exception as exc:
-        _check(checks, "cloudflare", False, f"Cloudflare configuration is invalid: {type(exc).__name__}: {exc}")
+        _check(
+            checks,
+            "cloudflare",
+            False,
+            f"Cloudflare configuration is invalid: {type(exc).__name__}: {exc}",
+        )
 
     try:
         notifications = NotificationConfig.from_env()

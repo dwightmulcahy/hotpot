@@ -77,6 +77,44 @@ class DashboardProductionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["allowlist_cidrs"], ["10.0.0.0/8"])
         self.assertEqual(row["trusted_proxy_cidrs"], ["127.0.0.1/32"])
 
+    def test_cloudflare_targets_are_derived_from_app_registry(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        registry = Path(self.tmp.name) / "apps.toml"
+        registry.write_text(
+            """
+[[apps]]
+id = "one"
+name = "One"
+[apps.dashboard]
+url = "http://127.0.0.1:18001"
+[apps.cloudflare]
+zone_id = "zone-registry"
+hosts = ["WWW.Example.COM"]
+""",
+            encoding="utf-8",
+        )
+        with patch.dict(
+            os.environ,
+            {
+                "HOTPOT_APP_REGISTRY": str(registry),
+                "HOTPOT_DASHBOARD_INSTANCES": "not-json",
+                "HOTPOT_ADMIN_TOKEN": "collector-token",
+                "HOTPOT_DASHBOARD_TOKEN": "viewer-token",
+                "HOTPOT_DASHBOARD_DATA_DIR": self.tmp.name,
+                "HOTPOT_CLOUDFLARE_ENFORCEMENT_ENABLED": "true",
+                "HOTPOT_CLOUDFLARE_API_TOKEN": "cf-token",
+                "HOTPOT_CLOUDFLARE_TARGETS": "not-json",
+            },
+            clear=False,
+        ):
+            dashboard = ProductionDashboard()
+        self.assertTrue(dashboard.cloudflare.configured)
+        self.assertEqual(dashboard.cloudflare.targets["one"].zone_id, "zone-registry")
+        self.assertEqual(
+            dashboard.cloudflare.targets["one"].hosts, ("www.example.com",)
+        )
+
     def test_cloudflare_enforcement_defaults_to_explicit_opt_in(self) -> None:
         dashboard = self.make_dashboard()
         status = dashboard.cloudflare.public_status()

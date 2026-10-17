@@ -13,6 +13,8 @@ from typing import Any
 
 from aiohttp import ClientSession, ClientTimeout, web
 
+from .app_registry import AppRegistry, registry_from_environment
+
 
 @dataclass(frozen=True)
 class Instance:
@@ -21,31 +23,17 @@ class Instance:
     url: str
 
 
+def instances_from_registry(registry: AppRegistry) -> list[Instance]:
+    return [
+        Instance(app.instance_id, app.name, app.url)
+        for app in registry.apps
+    ]
+
+
 def instances_from_env() -> list[Instance]:
-    raw = os.getenv("HOTPOT_DASHBOARD_INSTANCES", "").strip()
-    if not raw:
-        raise RuntimeError("HOTPOT_DASHBOARD_INSTANCES is required")
-    try:
-        values = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("HOTPOT_DASHBOARD_INSTANCES must be valid JSON") from exc
-    if not isinstance(values, list) or not values:
-        raise RuntimeError("HOTPOT_DASHBOARD_INSTANCES must be a non-empty JSON list")
-    result: list[Instance] = []
-    seen: set[str] = set()
-    for value in values:
-        if not isinstance(value, dict):
-            raise RuntimeError("Each dashboard instance must be a JSON object")
-        instance_id = str(value.get("id", "")).strip()
-        name = str(value.get("name", instance_id)).strip()
-        url = str(value.get("url", "")).strip().rstrip("/")
-        if not instance_id or not name or not url:
-            raise RuntimeError("Each dashboard instance requires id, name, and url")
-        if instance_id in seen:
-            raise RuntimeError(f"Duplicate dashboard instance id: {instance_id}")
-        seen.add(instance_id)
-        result.append(Instance(instance_id, name, url))
-    return result
+    """Compatibility wrapper for callers that still use the old function name."""
+
+    return instances_from_registry(registry_from_environment())
 
 
 class CentralStore:
@@ -246,7 +234,8 @@ class CentralStore:
 
 class Dashboard:
     def __init__(self) -> None:
-        self.instances = instances_from_env()
+        self.registry = registry_from_environment()
+        self.instances = instances_from_registry(self.registry)
         self.hotpot_token = os.getenv("HOTPOT_ADMIN_TOKEN", "").strip()
         if not self.hotpot_token:
             raise RuntimeError("HOTPOT_ADMIN_TOKEN is required for dashboard collection")

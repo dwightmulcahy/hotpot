@@ -183,6 +183,50 @@ class DeploymentUxTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(checks["core-release"], "fail")
         self.assertEqual(checks["shared-config"], "fail")
 
+    async def test_upgrade_plan_uses_registry_service_mapping(self) -> None:
+        statuses = {key: _status(key) for key in ("app-one", "app-two", "app-three", "app-four")}
+        dashboard = _Dashboard(statuses)
+        dashboard.registry = SimpleNamespace(
+            apps=(
+                SimpleNamespace(instance_id="app-one", service="gateway-one"),
+                SimpleNamespace(instance_id="app-two", service=None),
+                SimpleNamespace(instance_id="app-three", service="gateway-three"),
+                SimpleNamespace(instance_id="app-four", service=None),
+            )
+        )
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            "os.environ",
+            {
+                "HOTPOT_ADMIN_TOKEN": "collector-token",
+                "HOTPOT_DASHBOARD_TOKEN": "viewer-token",
+                "HOTPOT_DASHBOARD_DATA_DIR": directory,
+                "HOTPOT_DASHBOARD_INSTANCES": json.dumps(
+                    [
+                        {"id": item.instance_id, "name": item.name, "url": item.url}
+                        for item in dashboard.instances
+                    ]
+                ),
+                "HOTPOT_CLOUDFLARE_ENFORCEMENT_ENABLED": "false",
+                "HOTPOT_DASHBOARD_NOTIFICATIONS_ENABLED": "false",
+                "HOTPOT_DASHBOARD_BACKUPS_ENABLED": "false",
+                "HOTPOT_VERSION": "v1.2.3",
+                "HOTPOT_GIT_SHA": "same-sha",
+                "HOTPOT_BUILD_DATE": "2026-10-08T17:00:00Z",
+            },
+            clear=True,
+        ):
+            report = await collect_deployment_report(dashboard)
+        self.assertEqual(
+            report["upgrade_plan"]["services"],
+            [
+                "gateway-one",
+                "hotpot-app-two",
+                "gateway-three",
+                "hotpot-app-four",
+                "hotpot-dashboard",
+            ],
+        )
+
     def test_static_deployment_ui_is_read_only_except_existing_verified_backup_action(self) -> None:
         root = Path(__file__).resolve().parents[1]
         runtime = (root / "dashboard" / "policy_runtime.py").read_text(encoding="utf-8")

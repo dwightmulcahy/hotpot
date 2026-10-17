@@ -6,7 +6,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from dashboard.app_registry import load_app_registry, parse_app_registry
+from dashboard.app_registry import (
+    load_app_registry,
+    parse_app_registry,
+    registry_from_environment,
+)
 
 
 VALID = """
@@ -159,6 +163,42 @@ url = "http://one"
             missing = Path(directory) / "missing.toml"
             with self.assertRaisesRegex(RuntimeError, "Could not read app registry"):
                 load_app_registry(missing)
+
+    def test_environment_loader_preserves_legacy_configuration(self) -> None:
+        legacy_instances = '[{"id":"one","name":"One","url":"http://127.0.0.1:18001"}]'
+        legacy_targets = '{"one":{"zone_id":"zone-one","hosts":["WWW.Example.COM"]}}'
+        with patch.dict(
+            os.environ,
+            {
+                "HOTPOT_APP_REGISTRY": "",
+                "HOTPOT_DASHBOARD_INSTANCES": legacy_instances,
+                "HOTPOT_CLOUDFLARE_TARGETS": legacy_targets,
+            },
+            clear=False,
+        ):
+            registry = registry_from_environment()
+        self.assertEqual(registry.source, "legacy-environment")
+        app = registry.apps[0]
+        self.assertEqual(app.instance_id, "one")
+        self.assertEqual(app.cloudflare.zone_id, "zone-one")
+        self.assertEqual(app.cloudflare.hosts, ("www.example.com",))
+
+    def test_explicit_registry_takes_precedence_over_legacy_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "apps.toml"
+            path.write_text(VALID, encoding="utf-8")
+            with patch.dict(
+                os.environ,
+                {
+                    "HOTPOT_APP_REGISTRY": str(path),
+                    "HOTPOT_DASHBOARD_INSTANCES": "not-json",
+                    "HOTPOT_CLOUDFLARE_TARGETS": "not-json",
+                },
+                clear=False,
+            ):
+                registry = registry_from_environment()
+        self.assertEqual(registry.source, str(path))
+        self.assertEqual(registry.apps[0].instance_id, "app-one")
 
 
 if __name__ == "__main__":

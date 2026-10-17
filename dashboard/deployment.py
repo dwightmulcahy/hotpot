@@ -98,9 +98,17 @@ def _upgrade_plan(build: dict[str, str], dashboard: Any) -> dict[str, Any]:
         ).strip()
         or DEFAULT_DASHBOARD_SERVICE
     )
-    default_services = tuple(
-        f"hotpot-{instance.instance_id}" for instance in dashboard.instances
-    ) + (dashboard_service,)
+    registry = getattr(dashboard, "registry", None)
+    if registry is not None:
+        default_core_services = tuple(
+            app.service or f"hotpot-{app.instance_id}"
+            for app in registry.apps
+        )
+    else:
+        default_core_services = tuple(
+            f"hotpot-{instance.instance_id}" for instance in dashboard.instances
+        )
+    default_services = default_core_services + (dashboard_service,)
     services = _csv("HOTPOT_DASHBOARD_DEPLOY_SERVICES", default_services)
 
     quoted_file = shlex.quote(compose_file)
