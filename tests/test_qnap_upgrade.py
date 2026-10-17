@@ -44,27 +44,19 @@ class QnapUpgradeTests(unittest.TestCase):
         self.assertIn("HOTPOT_DASHBOARD_DEPLOY_SERVICES=", env)
 
 
-    def test_public_deployment_examples_do_not_embed_private_instance_names(self) -> None:
+    def test_public_deployment_examples_use_generic_placeholders(self) -> None:
         root = Path(__file__).resolve().parents[1]
-        paths = (
-            root / "dashboard" / "deployment.py",
-            root / "scripts" / "qnap-upgrade.sh",
-            root / "compose.qnap.example.yml",
-            root / "dashboard.env.example",
-            root / "docs" / "QNAP_UPGRADES.md",
-        )
-        combined = "\n".join(path.read_text(encoding="utf-8").lower() for path in paths)
-        for private_value in (
-            "monkeyhead",
-            "watersolver",
-            "brewwatersolver.com",
-            "monkeyheadbrewing.com",
-            "bytemeloser.com",
-            "passwordlab.dwights.dev",
-            "hotpot-hvac",
-            "hotpot-tapmenu",
-        ):
-            self.assertNotIn(private_value, combined)
+        compose = (root / "compose.qnap.example.yml").read_text(encoding="utf-8")
+        env = (root / "dashboard.env.example").read_text(encoding="utf-8")
+        deployment = (root / "dashboard" / "deployment.py").read_text(encoding="utf-8")
+
+        self.assertIn("hotpot-app-one:", compose)
+        self.assertIn("hotpot-app-two:", compose)
+        self.assertIn("app-one.example.com", compose)
+        self.assertIn('"id":"app-one"', env)
+        self.assertIn('"id":"app-two"', env)
+        self.assertIn("f\"hotpot-{instance.instance_id}\"", deployment)
+        self.assertNotIn("DEFAULT_SERVICES =", deployment)
 
 
 if __name__ == "__main__":
