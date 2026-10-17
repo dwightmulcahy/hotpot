@@ -65,7 +65,7 @@ class PolicyDashboardApplication(DashboardApplication):
         if self.client is not None:
             try:
                 await self.policy_manager.reconcile(
-                    self.client, token=self.hotpot_token, force=False
+                    self.client, token_for=self.policy_token_for, force=False
                 )
             except Exception:
                 # Each core keeps its last-known-good snapshot when central sync is
@@ -192,7 +192,7 @@ class PolicyDashboardApplication(DashboardApplication):
         if self.client is None:
             raise web.HTTPServiceUnavailable(text="dashboard HTTP client is not ready")
         sync = await self.policy_manager.reconcile(
-            self.client, token=self.hotpot_token, force=True
+            self.client, token_for=self.policy_token_for, force=True
         )
         await self._record_action(
             context,
@@ -218,7 +218,7 @@ class PolicyDashboardApplication(DashboardApplication):
         if self.client is None:
             raise web.HTTPServiceUnavailable(text="dashboard HTTP client is not ready")
         sync = await self.policy_manager.reconcile(
-            self.client, token=self.hotpot_token, force=True
+            self.client, token_for=self.policy_token_for, force=True
         )
         await self._record_action(
             context,
@@ -236,7 +236,7 @@ class PolicyDashboardApplication(DashboardApplication):
         if self.client is None:
             raise web.HTTPServiceUnavailable(text="dashboard HTTP client is not ready")
         sync = await self.policy_manager.reconcile(
-            self.client, token=self.hotpot_token, force=True
+            self.client, token_for=self.policy_token_for, force=True
         )
         await self._record_action(
             context,

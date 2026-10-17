@@ -18,21 +18,36 @@ class GeoIPUpdateConfigTests(unittest.TestCase):
         )[0]
         self.assertIn('user: "1000:100"', geoip_section)
 
-    def test_qnap_compose_mounts_file_backed_secrets_read_only(self):
+    def test_qnap_compose_mounts_scoped_core_secrets_and_dashboard_tree_read_only(self):
         root = Path(__file__).resolve().parents[1]
         compose = (root / "compose.qnap.example.yml").read_text(encoding="utf-8")
-        secret_mount = "/share/Data/config/cloudflared/secrets:/run/secrets:ro"
-        hotpot_sections = [
-            section
-            for section in compose.split("\n\n")
-            if any(
-                line.startswith("  hotpot-") and line.endswith(":")
-                for line in section.splitlines()
-            )
-        ]
-        self.assertGreaterEqual(len(hotpot_sections), 2)
-        for section in hotpot_sections:
-            self.assertIn(secret_mount, section)
+        self.assertIn(
+            "/share/Data/config/cloudflared/secrets/app-one:/run/secrets/app-one:ro",
+            compose,
+        )
+        self.assertIn(
+            "/share/Data/config/cloudflared/secrets/app-two:/run/secrets/app-two:ro",
+            compose,
+        )
+        dashboard = compose.split("  hotpot-dashboard:", 1)[1]
+        self.assertIn(
+            "/share/Data/config/cloudflared/secrets:/run/secrets:ro",
+            dashboard,
+        )
+        app_one = compose.split("  hotpot-app-one:", 1)[1].split(
+            "  hotpot-app-two:", 1
+        )[0]
+        app_two = compose.split("  hotpot-app-two:", 1)[1].split(
+            "  geoipupdate:", 1
+        )[0]
+        self.assertNotIn(
+            "/share/Data/config/cloudflared/secrets:/run/secrets:ro",
+            app_one,
+        )
+        self.assertNotIn(
+            "/share/Data/config/cloudflared/secrets:/run/secrets:ro",
+            app_two,
+        )
         self.assertIn("cloudflare/cloudflared:2026.7.1@sha256:", compose)
 
     def test_geoipupdate_example_downloads_asn_and_city_daily(self):

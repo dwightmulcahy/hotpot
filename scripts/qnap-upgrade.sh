@@ -9,7 +9,7 @@ DRY_RUN=0
 SKIP_PULL=0
 
 CORE_SERVICES="${HOTPOT_QNAP_CORE_SERVICES:-}"
-DASHBOARD_SERVICE="${HOTPOT_QNAP_DASHBOARD_SERVICE:-hotpot-dashboard}"
+DASHBOARD_SERVICE="${HOTPOT_QNAP_DASHBOARD_SERVICE:-}"
 ALL_SERVICES=""
 
 usage() {
@@ -27,8 +27,9 @@ Options:
   --wait SECONDS     Health timeout per service (default: 90)
   --deployment-dir PATH  Directory for deployment manifests
   --services LIST    Space-separated Hotpot core Compose services
-                     (default: auto-discover hotpot-* services)
-  --dashboard-service NAME  Dashboard Compose service (default: hotpot-dashboard)
+                     (default: discover io.hotpot.role=core labels)
+  --dashboard-service NAME  Dashboard Compose service
+                     (default: discover io.hotpot.role=dashboard label)
   --skip-pull        Do not pull images before recreation
   --dry-run          Print the rollout without changing containers
   -h, --help         Show this help
@@ -111,6 +112,19 @@ container_id_for_service() {
   HOTPOT_IMAGE_TAG="$IMAGE_TAG" docker compose -f "$COMPOSE_FILE" ps -q "$1"
 }
 
+discover_labeled_services() {
+  wanted_role=$1
+  for candidate in $(HOTPOT_IMAGE_TAG="$IMAGE_TAG" docker compose -f "$COMPOSE_FILE" config --services); do
+    container_id=$(container_id_for_service "$candidate")
+    [ -n "$container_id" ] || continue
+    managed=$(docker inspect --format '{{index .Config.Labels "io.hotpot.managed"}}' "$container_id" 2>/dev/null || true)
+    role=$(docker inspect --format '{{index .Config.Labels "io.hotpot.role"}}' "$container_id" 2>/dev/null || true)
+    if [ "$managed" = "true" ] && [ "$role" = "$wanted_role" ]; then
+      printf '%s\n' "$candidate"
+    fi
+  done
+}
+
 wait_for_health() {
   service=$1
   if [ "$DRY_RUN" -eq 1 ]; then
@@ -172,15 +186,27 @@ echo "  tag:     $IMAGE_TAG"
 [ "$IMAGE_TAG" = "latest" ] && echo "  warning: latest is mutable; an immutable release tag is safer for rollback"
 
 # Parse/interpolate the exact Compose before touching any container. This still
-# runs during --dry-run because validation and service discovery are read-only.
+# runs during --dry-run because validation and discovery are read-only.
 echo_cmd config -q
 HOTPOT_IMAGE_TAG="$IMAGE_TAG" docker compose -f "$COMPOSE_FILE" config -q
 
+if [ -z "$DASHBOARD_SERVICE" ]; then
+  DASHBOARD_SERVICE=$(discover_labeled_services dashboard | head -n 1)
+fi
+if [ -z "$DASHBOARD_SERVICE" ]; then
+  DASHBOARD_SERVICE=hotpot-dashboard
+  echo "  warning: dashboard label not found; using legacy service fallback: $DASHBOARD_SERVICE"
+fi
+
+if [ -z "$CORE_SERVICES" ]; then
+  CORE_SERVICES=$(discover_labeled_services core)
+fi
 if [ -z "$CORE_SERVICES" ]; then
   CORE_SERVICES=$(HOTPOT_IMAGE_TAG="$IMAGE_TAG" docker compose -f "$COMPOSE_FILE" config --services | awk -v dashboard="$DASHBOARD_SERVICE" '$0 ~ /^hotpot-/ && $0 != dashboard {print}')
+  [ -z "$CORE_SERVICES" ] || echo "  warning: core labels not found; using legacy hotpot-* naming fallback"
 fi
 [ -n "$CORE_SERVICES" ] || {
-  echo "No Hotpot core services found. Use --services or HOTPOT_QNAP_CORE_SERVICES." >&2
+  echo "No Hotpot core services found. Add io.hotpot.role=core labels or use --services/HOTPOT_QNAP_CORE_SERVICES." >&2
   exit 1
 }
 ALL_SERVICES="$CORE_SERVICES $DASHBOARD_SERVICE"
@@ -194,8 +220,8 @@ else
   echo "Skipping image pull."
 fi
 
-# Do not take every gateway down at once. Each core must pass its public health
-# endpoint before the next core is recreated. The dashboard is intentionally last.
+# Do not take every gateway down at once. Each core must pass its Docker health
+# gate before the next core is recreated. The dashboard is intentionally last.
 for service in $CORE_SERVICES; do
   echo "\nRecreating $service..."
   compose up -d --no-deps --force-recreate "$service"

@@ -55,7 +55,7 @@ hotpot/
 
 ## Repository and Docker image
 
-The repository is structured to build and test on every push/pull request and publish a multi-platform Docker image to Docker Hub when you push a semantic Git tag. GitHub Actions never creates Git tags for you.
+The repository runs CI for pull requests and pushes to `main`, and publishes multi-platform Docker images when you push a semantic Git tag. GitHub Actions never creates Git tags for you.
 
 Configure these GitHub Actions repository secrets:
 
@@ -153,7 +153,8 @@ This wastes scanner time while keeping Hotpot's own resource consumption bounded
 
 ## Dashboard
 
-With `HOTPOT_ADMIN_TOKEN` configured, open:
+With a read-capable `HOTPOT_COLLECTOR_TOKEN`, `HOTPOT_POLICY_TOKEN`, or legacy
+`HOTPOT_ADMIN_TOKEN` configured, open:
 
 ```text
 /_hotpot/dashboard
@@ -180,7 +181,7 @@ It is rendered server-side with no external JavaScript/CDN dependency.
 
 ### Intelligence JSON APIs
 
-All require the same bearer token:
+All require a read-capable bearer token:
 
 ```text
 GET /_hotpot/status
@@ -190,7 +191,11 @@ GET /_hotpot/api/attacker?ip=203.0.113.7
 
 `/_hotpot/api/attacker` returns the persistent summary and most recent events for one source address.
 
-If `HOTPOT_ADMIN_TOKEN` is unset, these administration/intelligence endpoints return `401`. This is intentional: Hotpot should not publicly expose its telemetry. `/_hotpot/health` remains public for container health checks.
+If no read-capable token is configured, these administration/intelligence endpoints
+return `401`. This is intentional: Hotpot should not publicly expose its telemetry.
+A collector token cannot update dashboard-managed policy; a policy token can.
+`HOTPOT_ADMIN_TOKEN` remains a legacy full-access fallback.
+`/_hotpot/health` remains public for container health checks.
 
 ## Profiles
 
@@ -229,7 +234,8 @@ Request bodies and submitted credentials are intentionally **not** stored. Hotpo
 | `HOTPOT_UPSTREAM` | required | Upstream service URL |
 | `HOTPOT_BIND` | `0.0.0.0` | Listen address |
 | `HOTPOT_PORT` | `8080` | Listen port |
-| `HOTPOT_PROFILES` | `wordpress,secrets,git,php,generic` | Enabled profiles |
+| `HOTPOT_PROFILES` | `wordpress,secrets,git,php,generic` | Enabled profiles when not using the app registry |
+| `HOTPOT_APP_REGISTRY` | unset | Optional `apps.toml`; when set, the matching instance's name/profiles/scoped credential references are authoritative |
 | `HOTPOT_DATA_DIR` | `/data` | Persistent JSONL/SQLite directory |
 | `HOTPOT_MAX_REQUEST_BODY` | `8388608` | Maximum proxied request body |
 | `HOTPOT_UPSTREAM_TIMEOUT` | `60` | Upstream timeout seconds |
@@ -240,7 +246,9 @@ Request bodies and submitted credentials are intentionally **not** stored. Hotpo
 | `HOTPOT_TARPIT_CHUNK_DELAY` | `2.0` | Delay between streamed chunks |
 | `HOTPOT_TARPIT_MAX_SECONDS` | `20` | Base tarpit lifetime |
 | `HOTPOT_TARPIT_ESCALATED_MAX_SECONDS` | `60` | Hard upper bound after repeat-offender escalation |
-| `HOTPOT_ADMIN_TOKEN` | unset | Enables authenticated dashboard/status/API endpoints |
+| `HOTPOT_COLLECTOR_TOKEN` | unset | Read-only status/event/intelligence credential; supports `_FILE` |
+| `HOTPOT_POLICY_TOKEN` | unset | Read + policy-sync credential; supports `_FILE` |
+| `HOTPOT_ADMIN_TOKEN` | unset | Legacy full-access credential/fallback; supports `_FILE` |
 | `HOTPOT_ALLOW_CIDRS` | unset | Comma-separated trusted IPs/CIDRs that bypass deception |
 | `HOTPOT_RETENTION_DAYS` | `30` | SQLite/JSONL probe-event retention |
 | `HOTPOT_ATTACKER_RETENTION_DAYS` | `90` | Inactive attacker-summary retention |
@@ -367,6 +375,41 @@ HOTPOT_SMTP_TO: "admin@example.com,security@example.com"
 ```
 
 SMTP credentials are used only for delivery and are not written to attack logs or SQLite.
+
+
+## Multi-app registry and centralized intelligence
+
+For multi-app deployments, use `hotpot-apps.toml` as the control-plane source of
+truth while keeping one isolated Hotpot core per protected application. The registry
+holds each app's identity, enabled profiles, dashboard URL, deployment service,
+Cloudflare targets and scoped credential-file references.
+
+The centralized dashboard still ingests events from **all** configured applications.
+Every event is stored with its `instance_id`, so Hotpot keeps per-app views while
+also correlating attackers and campaigns across applications.
+
+Compose continues to own the traffic-specific wiring for each core:
+`HOTPOT_INSTANCE_ID`, `HOTPOT_PORT`, and `HOTPOT_UPSTREAM`. On QNAP, managed
+core/dashboard services use `io.hotpot.*` labels so the rollout helper does not
+depend on service naming conventions.
+
+Existing QNAP deployments can be converted with the included read-only-first
+migration helper:
+
+```bash
+python3 scripts/migrate_qnap_registry.py          # preview only
+python3 scripts/migrate_qnap_registry.py --apply  # back up + stage migration
+
+# Rehearse against a copied QNAP config tree without touching the NAS:
+python3 scripts/migrate_qnap_registry.py \
+  --snapshot-root ~/Projects/hotpot-qnap-migrated
+```
+
+After the registry-aware images are verified, use `--retire-legacy` to preview and
+then explicitly remove the old shared-admin/JSON fallbacks.
+
+See [App registry and multi-app deployment](docs/app-registry.md) and
+[QNAP deployment and upgrades](docs/QNAP_UPGRADES.md).
 
 ## Cloudflare Tunnel mode
 

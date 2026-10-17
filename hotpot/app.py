@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import time
 from collections import Counter
 from urllib.parse import urlsplit
@@ -105,12 +106,40 @@ class Hotpot:
                     "error": type(exc).__name__,
                 })
 
-    def authorized(self, request: web.Request) -> bool:
-        token = self.settings.admin_token
-        if not token:
-            return False
+    def _authorized_with_tokens(
+        self, request: web.Request, tokens: tuple[str | None, ...]
+    ) -> bool:
         auth = request.headers.get("Authorization", "")
-        return auth == f"Bearer {token}"
+        if not auth:
+            return False
+        return any(
+            token
+            and hmac.compare_digest(auth, f"Bearer {token}")
+            for token in tokens
+        )
+
+    def authorized(self, request: web.Request) -> bool:
+        """Authorize read-only Hotpot administration endpoints."""
+
+        return self._authorized_with_tokens(
+            request,
+            (
+                getattr(self.settings, "collector_token", None),
+                getattr(self.settings, "policy_token", None),
+                self.settings.admin_token,
+            ),
+        )
+
+    def authorized_policy(self, request: web.Request) -> bool:
+        """Authorize policy-changing endpoints only."""
+
+        return self._authorized_with_tokens(
+            request,
+            (
+                getattr(self.settings, "policy_token", None),
+                self.settings.admin_token,
+            ),
+        )
 
     async def health(self, request: web.Request) -> web.Response:
         return web.json_response({"healthy": True})

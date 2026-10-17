@@ -23,6 +23,7 @@ COPY requirements-core.txt .
 RUN pip install --no-cache-dir -r requirements-core.txt
 COPY sitecustomize.py ./sitecustomize.py
 COPY hotpot ./hotpot
+COPY hotpot_common ./hotpot_common
 COPY profiles ./profiles
 RUN mkdir -p /data && chown -R hotpot:hotpot /data /app
 USER 10001:10001
