@@ -84,13 +84,14 @@ The helper performs this sequence:
 
 1. `docker compose ... config -q` — fail before changing anything if Compose is
    invalid.
-2. Pull only the four Hotpot cores and `hotpot-dashboard`.
-3. Recreate `hotpot-monkeyhead`; wait for `/_hotpot/health`.
-4. Recreate `hotpot-watersolver`; wait for health.
-5. Recreate `hotpot-hvac`; wait for health.
-6. Recreate `hotpot-tapmenu`; wait for health.
-7. Recreate `hotpot-dashboard` last; wait for `/health`.
-8. Record image names, immutable image IDs, start times, the requested tag, and the
+2. Discover core services named `hotpot-*`, excluding the dashboard service.
+   Use `--services` or `HOTPOT_QNAP_CORE_SERVICES` when your Compose service
+   names use a different convention.
+3. Pull only the discovered/configured Hotpot cores and dashboard.
+4. Recreate each core one at a time and wait for its Docker healthcheck before
+   moving to the next service.
+5. Recreate the dashboard last and wait for its Docker healthcheck.
+6. Record image names, immutable image IDs, start times, the requested tag, and the
    Compose path under `/share/Data/config/cloudflared/hotpot-deployments/`.
 
 If a health gate fails, the script stops immediately, prints the last container
@@ -124,18 +125,22 @@ not grant the dashboard permission to operate Docker:
 ```text
 HOTPOT_DASHBOARD_COMPOSE_FILE=/share/Data/config/cloudflared/docker-compose.yml
 HOTPOT_DASHBOARD_DEPLOY_TAG=latest
-HOTPOT_DASHBOARD_DEPLOY_SERVICES=hotpot-monkeyhead,hotpot-watersolver,hotpot-hvac,hotpot-tapmenu,hotpot-dashboard
+HOTPOT_DASHBOARD_DEPLOY_SERVICES=
+HOTPOT_DASHBOARD_DEPLOY_DASHBOARD_SERVICE=hotpot-dashboard
 ```
 
 Set `HOTPOT_DASHBOARD_DEPLOY_TAG` to the release you normally deploy if you want the
-UI's copyable commands to default to that immutable tag. You can always pass a
-different `--tag` to the shell helper.
+UI's copyable commands to default to that immutable tag. When
+`HOTPOT_DASHBOARD_DEPLOY_SERVICES` is empty, the dashboard derives
+`hotpot-<instance-id>` for every configured instance and appends the dashboard
+service. Set it explicitly only when your Compose service names differ. You can
+always pass a different `--tag` or `--services` to the shell helper.
 
 ## After the rollout
 
 Return to **Deployment** and refresh. The expected steady state is:
 
-- 4/4 healthy cores;
+- all configured cores healthy;
 - matching core releases and dashboard release;
 - matching shared config fingerprints;
 - matching expected/remote instance IDs;
