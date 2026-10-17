@@ -145,37 +145,184 @@ That preserves both views:
 
 Separate traffic plane, centralized intelligence.
 
-## Safe migration from the legacy environment configuration
+## Migrating an existing QNAP deployment
 
-A controlled migration can be done without a flag day:
+The repository includes `scripts/migrate_qnap_registry.py` specifically for an
+existing QNAP/Container Station deployment. It reads the **current** Compose
+configuration through `docker compose config --format json`, combines that with
+`hotpot.env` and `dashboard.env`, and builds the registry from the configuration
+that is actually in use.
 
-1. Create unique collector and policy tokens for every protected application.
-2. Put those tokens in per-app secret files readable by the Hotpot container UID.
-3. Build `hotpot-apps.toml` from the existing dashboard instance list, profile
-   choices, Cloudflare targets and Compose service names.
-4. Mount the registry and the app-specific secret directory into each core.
-5. Mount the registry and the full secret tree read-only into the dashboard.
-6. Add the `io.hotpot.*` labels to cores and dashboard.
-7. Keep the legacy `HOTPOT_ADMIN_TOKEN`, `HOTPOT_DASHBOARD_INSTANCES`, and
-   `HOTPOT_CLOUDFLARE_TARGETS` available during the transition if desired.
-8. Run `docker compose config -q`.
-9. Run `qnap-upgrade.sh --dry-run` and verify the discovered core/dashboard names.
-10. Recreate cores sequentially, then recreate the dashboard last.
-11. Verify Deployment is green and Policy revisions are in sync.
-12. Verify new events from multiple applications continue appearing in the central
-    dashboard.
-13. Remove the legacy shared-admin/JSON configuration after the registry path has
-    been proven in production.
+The defaults match the standard QNAP layout:
 
-If an app is intentionally different, put that difference in its registry entry.
-Per-app profiles are expected to differ and no longer count as fleet-wide
-configuration drift.
+```text
+/share/Data/config/cloudflared/docker-compose.yml
+/share/Data/config/cloudflared/hotpot.env
+/share/Data/config/cloudflared/dashboard.env
+/share/Data/config/cloudflared/hotpot-apps.toml
+/share/Data/config/cloudflared/secrets/
+```
+
+### Stage 1: preview
+
+Run the migration tool **without** `--apply` first:
+
+```sh
+python3 scripts/migrate_qnap_registry.py
+```
+
+Plan mode is read-only. It:
+
+- discovers every current Hotpot core by its effective
+  `HOTPOT_INSTANCE_ID`/`HOTPOT_UPSTREAM`;
+- reads the existing dashboard instance and Cloudflare target maps;
+- preserves per-service profile differences;
+- shows the proposed registry, Compose changes and env changes;
+- redacts token/password/bearer values from displayed diffs;
+- validates the proposed Compose file with `docker compose config -q`; and
+- does **not** create credentials, replace files or restart containers.
+
+If your files live somewhere else, pass explicit paths:
+
+```sh
+python3 scripts/migrate_qnap_registry.py \
+  --compose /path/to/docker-compose.yml \
+  --hotpot-env /path/to/hotpot.env \
+  --dashboard-env /path/to/dashboard.env \
+  --secrets-dir /path/to/secrets
+```
+
+### Stage 2: stage the registry/scoped credentials
+
+After reviewing the plan:
+
+```sh
+python3 scripts/migrate_qnap_registry.py --apply
+```
+
+This stage:
+
+1. creates a timestamped backup under
+   `/share/Data/config/cloudflared/hotpot-migration-backups/`;
+2. creates `hotpot-apps.toml`;
+3. generates a unique collector token and policy token for every app;
+4. copies supported shared core secret values such as SMTP/webhook credentials into
+   each app's scoped secret directory when needed;
+5. changes each core from the broad `/run/secrets` mount to only that app's
+   secret directory;
+6. mounts the registry into every core and the dashboard;
+7. adds the `io.hotpot.*` discovery labels;
+8. adds service-specific secret-file overrides so existing notification settings
+   continue to work;
+9. validates the final Compose configuration; and
+10. automatically restores the backed-up configuration if the apply fails.
+
+The script never prints generated credential values and writes scoped secret files
+with mode `0600`. When the Compose services use a numeric `user:`, the migration
+also checks that those files can be owned/read by that container user.
+
+**Stage 2 does not restart anything.**
+
+For rollback safety, it intentionally leaves the old
+`HOTPOT_ADMIN_TOKEN`, `HOTPOT_PROFILES`,
+`HOTPOT_DASHBOARD_INSTANCES`, and `HOTPOT_CLOUDFLARE_TARGETS` settings in place.
+Registry-aware images prefer the new configuration, but the old images can still
+restart while the rollout is in progress.
+
+### Stage 3: roll out the registry-aware images
+
+Do not apply the migration until the core/dashboard image you intend to deploy
+contains app-registry support.
+
+Preview the normal controlled rollout:
+
+```sh
+scripts/qnap-upgrade.sh \
+  --compose /share/Data/config/cloudflared/docker-compose.yml \
+  --tag YOUR_NEW_TAG \
+  --dry-run
+```
+
+Then perform it:
+
+```sh
+scripts/qnap-upgrade.sh \
+  --compose /share/Data/config/cloudflared/docker-compose.yml \
+  --tag YOUR_NEW_TAG
+```
+
+The existing QNAP helper recreates cores one at a time, health-gates each one and
+recreates the dashboard last.
+
+Before continuing, verify:
+
+- every core is healthy;
+- expected/remote instance IDs match;
+- the dashboard is receiving new events from multiple apps;
+- global-policy fingerprint state is sane;
+- each app reports scoped collector/policy credentials; and
+- Policy reports the desired/applied revisions in sync.
+
+### Stage 4: retire the legacy fallbacks
+
+Only after the new deployment has been verified, preview cleanup:
+
+```sh
+python3 scripts/migrate_qnap_registry.py --retire-legacy
+```
+
+Then apply it:
+
+```sh
+python3 scripts/migrate_qnap_registry.py --retire-legacy --apply
+```
+
+This creates another timestamped backup and removes the old shared admin credential,
+shared profile setting, dashboard instance JSON and Cloudflare target JSON from the
+active configuration. It also removes now-redundant per-service legacy name/profile
+overrides.
+
+Run the controlled QNAP rollout one more time so the running containers drop the
+legacy credentials from their process environment:
+
+```sh
+scripts/qnap-upgrade.sh \
+  --compose /share/Data/config/cloudflared/docker-compose.yml \
+  --tag YOUR_NEW_TAG
+```
+
+This two-stage cutover is deliberate: a configuration edit never takes away the old
+restart path before the new image has proven it can read the registry.
+
+### What the migration tool will not do
+
+It will not:
+
+- restart, stop or remove containers;
+- run `docker compose down`;
+- change Cloudflare itself;
+- delete the original shared secret files;
+- print existing or generated credential values; or
+- overwrite a conflicting existing scoped secret file.
+
+If it finds an ambiguous configuration—for example multiple legacy secret roots,
+unknown dashboard apps, invalid IDs, or a referenced secret file it cannot safely
+copy—it fails before modifying the deployment.
 
 ## Compatibility and rollback
 
 The dashboard still accepts the legacy instance and Cloudflare JSON variables when
 `HOTPOT_APP_REGISTRY` is not configured. Cores still accept the legacy environment
 profile list and admin token when they are not running in registry mode.
+
+The automated migration deliberately keeps those fallbacks through the first
+registry-aware rollout. If the new image must be rolled back at that point, restore
+the timestamped configuration backup and use the previous image tag with
+`qnap-upgrade.sh`.
+
+`--retire-legacy --apply` creates a second backup before removing the fallbacks.
+The original shared secret files are not deleted automatically, so an operator can
+restore an earlier configuration without having to reconstruct credential files.
 
 That fallback is intentional for migration and rollback. It should not be treated as
 the preferred multi-app configuration after the registry cutover is complete.

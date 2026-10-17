@@ -172,6 +172,25 @@ class QnapUpgradeTests(unittest.TestCase):
         self.assertIn("qnap-upgrade.sh --dry-run", doc)
         self.assertIn("legacy", doc)
         self.assertIn("HOTPOT_APP_REGISTRY", doc)
+        self.assertIn("migrate_qnap_registry.py", doc)
+        self.assertIn("--retire-legacy", doc)
+        self.assertIn("does not restart anything", doc)
+        self.assertIn("automatically restores", doc)
+
+    def test_qnap_upgrade_runbook_documents_two_stage_migration(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        doc = (root / "docs" / "QNAP_UPGRADES.md").read_text(encoding="utf-8")
+        readme = (root / "README.md").read_text(encoding="utf-8")
+        migration = root / "scripts" / "migrate_qnap_registry.py"
+
+        self.assertTrue(migration.is_file())
+        self.assertTrue(os.access(migration, os.X_OK))
+        self.assertIn("migrate_qnap_registry.py --apply", doc)
+        self.assertIn("migrate_qnap_registry.py --retire-legacy", doc)
+        self.assertIn("--retire-legacy --apply", doc)
+        self.assertIn("keeps the legacy shared admin", doc)
+        self.assertIn("migrate_qnap_registry.py", readme)
+        self.assertIn("preview only", readme)
 
     def test_public_deployment_examples_use_generic_placeholders(self) -> None:
         root = Path(__file__).resolve().parents[1]

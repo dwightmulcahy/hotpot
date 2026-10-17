@@ -84,6 +84,41 @@ only as a migration fallback when the labels are not present. Explicit
 `--services`, `--dashboard-service`, `HOTPOT_QNAP_CORE_SERVICES`, and
 `HOTPOT_QNAP_DASHBOARD_SERVICE` overrides remain available.
 
+## Migrate an existing legacy QNAP configuration
+
+For an existing deployment, use the registry migration helper before the rollout
+helper:
+
+```sh
+# Read-only: inspect current Compose/env configuration and show a redacted plan.
+python3 scripts/migrate_qnap_registry.py
+
+# After review: back up and stage registry/scoped credentials. No restart occurs.
+python3 scripts/migrate_qnap_registry.py --apply
+```
+
+The migration tool builds `hotpot-apps.toml` from the current deployment, generates
+unique per-app collector/policy tokens, narrows each core's secret mount, adds the
+Hotpot service labels, and validates the candidate/final Compose configuration.
+
+The first apply **keeps the legacy shared admin/profile/dashboard maps** so an older
+image can still restart during the cutover. After rolling out and verifying the
+registry-aware image, clean those fallbacks in a separate transaction:
+
+```sh
+# Preview.
+python3 scripts/migrate_qnap_registry.py --retire-legacy
+
+# Apply with another timestamped backup.
+python3 scripts/migrate_qnap_registry.py --retire-legacy --apply
+```
+
+Then recreate the registry-aware containers once more with `qnap-upgrade.sh` so
+their running environments no longer contain the legacy shared credential.
+
+The default QNAP paths and detailed failure/rollback behavior are documented in
+[App registry and multi-app deployment](app-registry.md).
+
 ## Install the QNAP helper
 
 The repository includes `scripts/qnap-upgrade.sh`. It validates Compose, discovers

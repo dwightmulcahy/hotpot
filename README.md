@@ -393,6 +393,17 @@ Compose continues to own the traffic-specific wiring for each core:
 core/dashboard services use `io.hotpot.*` labels so the rollout helper does not
 depend on service naming conventions.
 
+Existing QNAP deployments can be converted with the included read-only-first
+migration helper:
+
+```bash
+python3 scripts/migrate_qnap_registry.py          # preview only
+python3 scripts/migrate_qnap_registry.py --apply  # back up + stage migration
+```
+
+After the registry-aware images are verified, use `--retire-legacy` to preview and
+then explicitly remove the old shared-admin/JSON fallbacks.
+
 See [App registry and multi-app deployment](docs/app-registry.md) and
 [QNAP deployment and upgrades](docs/QNAP_UPGRADES.md).
 
