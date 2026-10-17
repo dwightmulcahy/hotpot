@@ -44,10 +44,10 @@ class _Dashboard:
         self.instances = [
             Instance(instance_id, instance_id.title(), f"http://127.0.0.1:{port}")
             for instance_id, port in (
-                ("monkeyhead", 18088),
-                ("watersolver", 12120),
-                ("hvac", 18080),
-                ("tapmenu", 18111),
+                ("app-one", 18081),
+                ("app-two", 18082),
+                ("app-three", 18083),
+                ("app-four", 18084),
             )
         ]
         self.statuses = statuses
@@ -90,7 +90,7 @@ def _status(instance_id: str, *, sha: str = "same-sha", shared: str = "shared-on
 
 class DeploymentUxTests(unittest.IsolatedAsyncioTestCase):
     async def test_ready_report_requires_health_identity_build_config_policy_and_backup_gate(self) -> None:
-        statuses = {key: _status(key) for key in ("monkeyhead", "watersolver", "hvac", "tapmenu")}
+        statuses = {key: _status(key) for key in ("app-one", "app-two", "app-three", "app-four")}
         dashboard = _Dashboard(statuses)
         with tempfile.TemporaryDirectory() as directory, patch.dict(
             "os.environ",
@@ -127,10 +127,30 @@ class DeploymentUxTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(check["status"] == "pass" for check in report["checks"]))
         self.assertEqual(report["upgrade_plan"]["target_tag"], "latest")
         self.assertTrue(report["upgrade_plan"]["mutable_tag"])
+        self.assertEqual(
+            report["upgrade_plan"]["services"],
+            [
+                "hotpot-app-one",
+                "hotpot-app-two",
+                "hotpot-app-three",
+                "hotpot-app-four",
+                "hotpot-dashboard",
+            ],
+        )
+        self.assertEqual(
+            report["upgrade_plan"]["health_urls"],
+            [
+                "http://127.0.0.1:18081/_hotpot/health",
+                "http://127.0.0.1:18082/_hotpot/health",
+                "http://127.0.0.1:18083/_hotpot/health",
+                "http://127.0.0.1:18084/_hotpot/health",
+                "http://127.0.0.1:19090/health",
+            ],
+        )
 
     async def test_release_and_config_skew_are_visible_and_block_ready_state(self) -> None:
-        statuses = {key: _status(key) for key in ("monkeyhead", "watersolver", "hvac", "tapmenu")}
-        statuses["hvac"] = _status("hvac", sha="different-sha", shared="different-shared")
+        statuses = {key: _status(key) for key in ("app-one", "app-two", "app-three", "app-four")}
+        statuses["app-three"] = _status("app-three", sha="different-sha", shared="different-shared")
         dashboard = _Dashboard(statuses)
         with tempfile.TemporaryDirectory() as directory, patch.dict(
             "os.environ",
