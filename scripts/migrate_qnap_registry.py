@@ -1447,12 +1447,12 @@ def main(argv: list[str] | None = None) -> int:
         registry = (
             args.registry.expanduser().resolve()
             if args.registry
-            else qnap_root / "hotpot-apps.toml"
+            else compose.parent / "hotpot-apps.toml"
         )
         backup_root = (
             args.backup_dir.expanduser().resolve()
             if args.backup_dir
-            else qnap_root / "hotpot-migration-backups"
+            else compose.parent / "hotpot-migration-backups"
         )
 
     requested_secrets = None
