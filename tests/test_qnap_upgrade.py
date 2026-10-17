@@ -12,8 +12,10 @@ class QnapUpgradeTests(unittest.TestCase):
         self.assertIn("config -q", script)
         self.assertIn("--force-recreate", script)
         self.assertIn("wait_for_health", script)
-        self.assertIn('DASHBOARD_SERVICE="hotpot-dashboard"', script)
+        self.assertIn('DASHBOARD_SERVICE="${HOTPOT_QNAP_DASHBOARD_SERVICE:-hotpot-dashboard}"', script)
+        self.assertIn("config --services", script)
         self.assertIn("for service in $CORE_SERVICES", script)
+        self.assertIn(".State.Health.Status", script)
         self.assertIn('compose up -d --no-deps --force-recreate "$DASHBOARD_SERVICE"', script)
         self.assertNotIn("\ndocker compose down", script)
         self.assertNotIn("\ncompose down", script)
@@ -23,7 +25,7 @@ class QnapUpgradeTests(unittest.TestCase):
     def test_qnap_example_supports_immutable_hotpot_image_tag(self) -> None:
         root = Path(__file__).resolve().parents[1]
         compose = (root / "compose.qnap.example.yml").read_text(encoding="utf-8")
-        self.assertGreaterEqual(compose.count("${HOTPOT_IMAGE_TAG:-latest}"), 5)
+        self.assertGreaterEqual(compose.count("${HOTPOT_IMAGE_TAG:-latest}"), 3)
         self.assertIn("immutable release tag", compose)
 
     def test_upgrade_documentation_calls_out_dry_run_and_rollback(self) -> None:
@@ -40,6 +42,29 @@ class QnapUpgradeTests(unittest.TestCase):
         self.assertIn("HOTPOT_DASHBOARD_COMPOSE_FILE=", env)
         self.assertIn("HOTPOT_DASHBOARD_DEPLOY_TAG=", env)
         self.assertIn("HOTPOT_DASHBOARD_DEPLOY_SERVICES=", env)
+
+
+    def test_public_deployment_examples_do_not_embed_private_instance_names(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        paths = (
+            root / "dashboard" / "deployment.py",
+            root / "scripts" / "qnap-upgrade.sh",
+            root / "compose.qnap.example.yml",
+            root / "dashboard.env.example",
+            root / "docs" / "QNAP_UPGRADES.md",
+        )
+        combined = "\n".join(path.read_text(encoding="utf-8").lower() for path in paths)
+        for private_value in (
+            "monkeyhead",
+            "watersolver",
+            "brewwatersolver.com",
+            "monkeyheadbrewing.com",
+            "bytemeloser.com",
+            "passwordlab.dwights.dev",
+            "hotpot-hvac",
+            "hotpot-tapmenu",
+        ):
+            self.assertNotIn(private_value, combined)
 
 
 if __name__ == "__main__":
