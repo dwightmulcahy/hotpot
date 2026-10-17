@@ -93,7 +93,6 @@ esac
 [ "$WAIT_SECONDS" -gt 0 ] || { echo "--wait must be greater than zero" >&2; exit 2; }
 
 command -v docker >/dev/null 2>&1 || { echo "docker is required" >&2; exit 1; }
-command -v curl >/dev/null 2>&1 || { echo "curl is required" >&2; exit 1; }
 [ -f "$COMPOSE_FILE" ] || { echo "Compose file not found: $COMPOSE_FILE" >&2; exit 1; }
 
 echo_cmd() {
