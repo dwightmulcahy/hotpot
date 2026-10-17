@@ -78,6 +78,9 @@ def _status(instance_id: str, *, sha: str = "same-sha", shared: str = "shared-on
             "git_sha": sha,
             "build_date": "2026-10-08T17:00:00Z",
             "config_fingerprint": f"full-{instance_id}",
+            "instance_fingerprint": f"full-{instance_id}",
+            "runtime_fingerprint": f"runtime-{instance_id}",
+            "global_policy_fingerprint": shared,
             "shared_config_fingerprint": shared,
             "policy_revision": "policy-one",
             "policy_updated_at": "2026-10-08T17:00:00+00:00",
@@ -121,6 +124,7 @@ class DeploymentUxTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report["summary"]["healthy"], 4)
         self.assertTrue(report["summary"]["release_consistent"])
         self.assertTrue(report["summary"]["dashboard_matches_cores"])
+        self.assertTrue(report["summary"]["global_policy_consistent"])
         self.assertTrue(report["summary"]["shared_config_consistent"])
         self.assertTrue(report["summary"]["policy_in_sync"])
         self.assertTrue(all(row["admin_token_source"] == "file" for row in report["instances"]))
