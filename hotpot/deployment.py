@@ -8,7 +8,7 @@ from typing import Any
 from .config import Settings
 
 
-DEPLOYMENT_SCHEMA_VERSION = 1
+DEPLOYMENT_SCHEMA_VERSION = 2
 
 
 def _fingerprint(payload: dict[str, Any]) -> str:
@@ -21,24 +21,24 @@ def _fingerprint(payload: dict[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _secret_source(name: str) -> str:
+def _secret_source(name: str, *, configured: bool = False) -> str:
     if os.getenv(f"{name}_FILE", "").strip():
         return "file"
     if os.getenv(name, "").strip():
         return "environment"
+    if configured and os.getenv("HOTPOT_APP_REGISTRY", "").strip():
+        return "registry-file"
+    if configured:
+        return "configured"
     return "unset"
 
 
-def _shared_config(settings: Settings) -> dict[str, Any]:
-    """Return the secret-free settings expected to be common across Hotpot peers."""
+def _global_policy_config(settings: Settings) -> dict[str, Any]:
+    """Return settings that are intentionally expected to match across cores."""
 
     return {
-        "profiles": list(settings.enabled_profiles),
         "max_request_body": int(settings.max_request_body),
         "upstream_timeout": float(settings.upstream_timeout),
-        "client_ip_mode": settings.client_ip_mode,
-        "trusted_proxy_cidrs": sorted(settings.trusted_proxy_cidrs),
-        "allow_cidrs": sorted(settings.allow_cidrs),
         "tarpit": {
             "enabled": bool(settings.tarpit_enabled),
             "max_concurrent": int(settings.tarpit_max_concurrent),
@@ -55,6 +55,15 @@ def _shared_config(settings: Settings) -> dict[str, Any]:
     }
 
 
+def _runtime_config(settings: Settings) -> dict[str, Any]:
+    """Return transport/source-identity settings that may legitimately vary by app."""
+
+    return {
+        "client_ip_mode": settings.client_ip_mode,
+        "trusted_proxy_cidrs": sorted(settings.trusted_proxy_cidrs),
+    }
+
+
 def deployment_snapshot(
     settings: Settings,
     *,
@@ -64,22 +73,32 @@ def deployment_snapshot(
 ) -> dict[str, Any]:
     """Describe one running core without exposing credential values.
 
-    Two hashes are intentionally emitted:
-    - ``config_fingerprint`` includes identity/listener/upstream fields and identifies
-      the complete effective deployment configuration for one instance.
-    - ``shared_config_fingerprint`` omits instance-specific fields so the dashboard
-      can spot accidental drift in the common hotpot.env policy across peers.
+    Fingerprints intentionally have different scopes:
+    - global_policy_fingerprint covers policy expected to match across cores.
+    - runtime_fingerprint covers source-identity/runtime wiring that may vary.
+    - instance_fingerprint covers the complete effective instance deployment.
+
+    config_fingerprint and shared_config_fingerprint remain compatibility aliases
+    for older dashboards. The latter now has corrected global-policy semantics so
+    per-app profiles, allowlists, and proxy wiring do not look like fleet drift.
     """
 
-    shared = _shared_config(settings)
+    global_policy = _global_policy_config(settings)
+    runtime = _runtime_config(settings)
     instance_config = {
-        **shared,
+        "global_policy": global_policy,
+        "runtime": runtime,
+        "profiles": list(settings.enabled_profiles),
+        "allow_cidrs": sorted(settings.allow_cidrs),
         "instance_id": settings.instance_id,
         "instance_name": settings.instance_name,
         "bind": settings.bind,
         "port": int(settings.port),
         "upstream": settings.upstream,
     }
+    global_policy_fingerprint = _fingerprint(global_policy)
+    runtime_fingerprint = _fingerprint(runtime)
+    instance_fingerprint = _fingerprint(instance_config)
     return {
         "schema_version": DEPLOYMENT_SCHEMA_VERSION,
         "instance_id": settings.instance_id,
@@ -87,8 +106,11 @@ def deployment_snapshot(
         "version": version,
         "git_sha": git_sha,
         "build_date": build_date,
-        "config_fingerprint": _fingerprint(instance_config),
-        "shared_config_fingerprint": _fingerprint(shared),
+        "instance_fingerprint": instance_fingerprint,
+        "runtime_fingerprint": runtime_fingerprint,
+        "global_policy_fingerprint": global_policy_fingerprint,
+        "config_fingerprint": instance_fingerprint,
+        "shared_config_fingerprint": global_policy_fingerprint,
         "config": {
             "bind": settings.bind,
             "port": int(settings.port),
@@ -100,6 +122,14 @@ def deployment_snapshot(
         },
         "secret_sources": {
             "admin_token": _secret_source("HOTPOT_ADMIN_TOKEN"),
+            "collector_token": _secret_source(
+                "HOTPOT_COLLECTOR_TOKEN",
+                configured=bool(settings.collector_token),
+            ),
+            "policy_token": _secret_source(
+                "HOTPOT_POLICY_TOKEN",
+                configured=bool(settings.policy_token),
+            ),
             "smtp_password": _secret_source("HOTPOT_SMTP_PASSWORD"),
             "webhook_bearer": _secret_source("HOTPOT_NOTIFY_WEBHOOK_BEARER"),
         },

@@ -98,9 +98,17 @@ def _upgrade_plan(build: dict[str, str], dashboard: Any) -> dict[str, Any]:
         ).strip()
         or DEFAULT_DASHBOARD_SERVICE
     )
-    default_services = tuple(
-        f"hotpot-{instance.instance_id}" for instance in dashboard.instances
-    ) + (dashboard_service,)
+    registry = getattr(dashboard, "registry", None)
+    if registry is not None:
+        default_core_services = tuple(
+            app.service or f"hotpot-{app.instance_id}"
+            for app in registry.apps
+        )
+    else:
+        default_core_services = tuple(
+            f"hotpot-{instance.instance_id}" for instance in dashboard.instances
+        )
+    default_services = default_core_services + (dashboard_service,)
     services = _csv("HOTPOT_DASHBOARD_DEPLOY_SERVICES", default_services)
 
     quoted_file = shlex.quote(compose_file)
@@ -192,9 +200,14 @@ async def _fetch_instance(dashboard: Any, instance: Any) -> dict[str, Any]:
             "git_sha": "unknown",
             "build_date": "unknown",
             "config_fingerprint": None,
+            "instance_fingerprint": None,
+            "runtime_fingerprint": None,
+            "global_policy_fingerprint": None,
             "shared_config_fingerprint": None,
             "policy_revision": None,
             "admin_token_source": "unknown",
+            "collector_token_source": "unknown",
+            "policy_token_source": "unknown",
         }
 
     deployment = status.get("deployment") if isinstance(status, dict) else None
@@ -233,6 +246,16 @@ async def _fetch_instance(dashboard: Any, instance: Any) -> dict[str, Any]:
         ),
         "config_fingerprint": deployment.get("config_fingerprint")
         or status.get("config_fingerprint"),
+        "instance_fingerprint": deployment.get("instance_fingerprint")
+        or deployment.get("config_fingerprint")
+        or status.get("instance_fingerprint")
+        or status.get("config_fingerprint"),
+        "runtime_fingerprint": deployment.get("runtime_fingerprint")
+        or status.get("runtime_fingerprint"),
+        "global_policy_fingerprint": deployment.get("global_policy_fingerprint")
+        or deployment.get("shared_config_fingerprint")
+        or status.get("global_policy_fingerprint")
+        or status.get("shared_config_fingerprint"),
         "shared_config_fingerprint": deployment.get("shared_config_fingerprint")
         or status.get("shared_config_fingerprint"),
         "policy_revision": deployment.get("policy_revision")
@@ -240,6 +263,10 @@ async def _fetch_instance(dashboard: Any, instance: Any) -> dict[str, Any]:
         "policy_updated_at": deployment.get("policy_updated_at")
         or policy.get("updated_at"),
         "admin_token_source": str(secret_sources.get("admin_token") or "unknown"),
+        "collector_token_source": str(
+            secret_sources.get("collector_token") or "unset"
+        ),
+        "policy_token_source": str(secret_sources.get("policy_token") or "unset"),
         "config": deployment.get("config") if isinstance(deployment.get("config"), dict) else {},
     }
 
@@ -292,15 +319,17 @@ async def collect_deployment_report(dashboard: Any) -> dict[str, Any]:
     else:
         release_consistent = len(release_keys) == 1
 
-    shared_fingerprints = [
-        str(row["shared_config_fingerprint"])
+    global_policy_fingerprints = [
+        str(row["global_policy_fingerprint"])
         for row in reachable
-        if row.get("shared_config_fingerprint")
+        if row.get("global_policy_fingerprint")
     ]
-    if len(shared_fingerprints) != len(instances):
-        shared_config_consistent: bool | None = None
+    if len(global_policy_fingerprints) != len(instances):
+        global_policy_consistent: bool | None = None
     else:
-        shared_config_consistent = len(set(shared_fingerprints)) == 1
+        global_policy_consistent = len(set(global_policy_fingerprints)) == 1
+    # Compatibility alias retained for API/UI consumers using the old name.
+    shared_config_consistent = global_policy_consistent
 
     core_shas = {
         str(row["git_sha"])
@@ -382,11 +411,11 @@ async def collect_deployment_report(dashboard: Any) -> dict[str, Any]:
         _check(
             "shared-config",
             _status_for_bool(shared_config_consistent),
-            "Common Hotpot configuration is consistent across all cores"
-            if shared_config_consistent is True
-            else "Common hotpot.env configuration drift detected"
-            if shared_config_consistent is False
-            else "Config fingerprint metadata is incomplete until all cores run this release",
+            "Common Hotpot global policy is consistent across all cores"
+            if global_policy_consistent is True
+            else "Common Hotpot global policy drift detected"
+            if global_policy_consistent is False
+            else "Global-policy fingerprint metadata is incomplete",
         ),
         _check(
             "policy-sync",
@@ -425,6 +454,7 @@ async def collect_deployment_report(dashboard: Any) -> dict[str, Any]:
             "identity_ok": identity_ok,
             "release_consistent": release_consistent,
             "dashboard_matches_cores": dashboard_matches_cores,
+            "global_policy_consistent": global_policy_consistent,
             "shared_config_consistent": shared_config_consistent,
             "policy_in_sync": policy_in_sync,
             "backup_ready": backup_ready,

@@ -13,6 +13,9 @@ from typing import Any
 
 from aiohttp import ClientSession, ClientTimeout, web
 
+from .app_registry import AppRegistry, registry_from_environment
+from .security import secret_from_env
+
 
 @dataclass(frozen=True)
 class Instance:
@@ -21,31 +24,17 @@ class Instance:
     url: str
 
 
+def instances_from_registry(registry: AppRegistry) -> list[Instance]:
+    return [
+        Instance(app.instance_id, app.name, app.url)
+        for app in registry.apps
+    ]
+
+
 def instances_from_env() -> list[Instance]:
-    raw = os.getenv("HOTPOT_DASHBOARD_INSTANCES", "").strip()
-    if not raw:
-        raise RuntimeError("HOTPOT_DASHBOARD_INSTANCES is required")
-    try:
-        values = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("HOTPOT_DASHBOARD_INSTANCES must be valid JSON") from exc
-    if not isinstance(values, list) or not values:
-        raise RuntimeError("HOTPOT_DASHBOARD_INSTANCES must be a non-empty JSON list")
-    result: list[Instance] = []
-    seen: set[str] = set()
-    for value in values:
-        if not isinstance(value, dict):
-            raise RuntimeError("Each dashboard instance must be a JSON object")
-        instance_id = str(value.get("id", "")).strip()
-        name = str(value.get("name", instance_id)).strip()
-        url = str(value.get("url", "")).strip().rstrip("/")
-        if not instance_id or not name or not url:
-            raise RuntimeError("Each dashboard instance requires id, name, and url")
-        if instance_id in seen:
-            raise RuntimeError(f"Duplicate dashboard instance id: {instance_id}")
-        seen.add(instance_id)
-        result.append(Instance(instance_id, name, url))
-    return result
+    """Compatibility wrapper for callers that still use the old function name."""
+
+    return instances_from_registry(registry_from_environment())
 
 
 class CentralStore:
@@ -246,11 +235,34 @@ class CentralStore:
 
 class Dashboard:
     def __init__(self) -> None:
-        self.instances = instances_from_env()
-        self.hotpot_token = os.getenv("HOTPOT_ADMIN_TOKEN", "").strip()
-        if not self.hotpot_token:
-            raise RuntimeError("HOTPOT_ADMIN_TOKEN is required for dashboard collection")
-        self.dashboard_token = os.getenv("HOTPOT_DASHBOARD_TOKEN", "").strip()
+        self.registry = registry_from_environment()
+        self.instances = instances_from_registry(self.registry)
+        self.hotpot_token = secret_from_env("HOTPOT_ADMIN_TOKEN") or None
+        self._collector_tokens: dict[str, str] = {}
+        self._policy_tokens: dict[str, str] = {}
+        for app in self.registry.apps:
+            if app.credentials is not None:
+                collector = self._read_registry_secret(
+                    app.credentials.collector_token_file,
+                    app.instance_id,
+                    "collector",
+                )
+                policy = self._read_registry_secret(
+                    app.credentials.policy_token_file,
+                    app.instance_id,
+                    "policy",
+                )
+            else:
+                collector = self.hotpot_token
+                policy = self.hotpot_token
+            if not collector:
+                raise RuntimeError(
+                    f"No collector credential configured for app {app.instance_id!r}"
+                )
+            self._collector_tokens[app.instance_id] = collector
+            if policy:
+                self._policy_tokens[app.instance_id] = policy
+        self.dashboard_token = secret_from_env("HOTPOT_DASHBOARD_TOKEN")
         if not self.dashboard_token:
             raise RuntimeError("HOTPOT_DASHBOARD_TOKEN is required")
         self.refresh_seconds = max(5, int(os.getenv("HOTPOT_DASHBOARD_REFRESH_SECONDS", "15")))
@@ -261,6 +273,47 @@ class Dashboard:
         self.cache: dict[str, Any] = {}
         self.cache_lock = asyncio.Lock()
         self.refresh_task: asyncio.Task | None = None
+
+    @staticmethod
+    def _read_registry_secret(path: str, instance_id: str, scope: str) -> str:
+        try:
+            value = Path(path).read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise RuntimeError(
+                f"Could not read {scope} token for app {instance_id!r}: {exc}"
+            ) from exc
+        if not value:
+            raise RuntimeError(
+                f"{scope.title()} token file for app {instance_id!r} is empty"
+            )
+        return value
+
+    def collector_token_for(self, instance_id: str) -> str:
+        try:
+            return self._collector_tokens[instance_id]
+        except KeyError as exc:
+            raise RuntimeError(
+                f"No collector credential configured for app {instance_id!r}"
+            ) from exc
+
+    def policy_token_for(self, instance_id: str) -> str:
+        try:
+            return self._policy_tokens[instance_id]
+        except KeyError as exc:
+            raise RuntimeError(
+                f"No policy credential configured for app {instance_id!r}"
+            ) from exc
+
+    def _collector_token_for_url(self, url: str) -> str:
+        matches = [
+            instance
+            for instance in self.instances
+            if url == instance.url or url.startswith(instance.url + "/")
+        ]
+        if not matches:
+            raise RuntimeError("Dashboard request does not match a configured app")
+        instance = max(matches, key=lambda item: len(item.url))
+        return self.collector_token_for(instance.instance_id)
 
     def authorized(self, request: web.Request) -> bool:
         auth = request.headers.get("Authorization", "")
@@ -301,7 +354,8 @@ class Dashboard:
 
     async def fetch_json(self, url: str) -> dict[str, Any]:
         assert self.client is not None
-        headers = {"Authorization": f"Bearer {self.hotpot_token}"}
+        token = self._collector_token_for_url(url)
+        headers = {"Authorization": f"Bearer {token}"}
         async with self.client.get(url, headers=headers) as response:
             response.raise_for_status()
             data = await response.json()

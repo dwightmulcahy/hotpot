@@ -77,6 +77,90 @@ class DashboardAuthTests(unittest.TestCase):
         denied = make_mocked_request("GET", "/", headers={"Authorization": f"Basic {wrong}"})
         self.assertFalse(dashboard.authorized(denied))
 
+    def test_dashboard_loads_instances_from_app_registry(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        registry = Path(self.tmp.name) / "apps.toml"
+        registry.write_text(
+            """
+[[apps]]
+id = "one"
+name = "Registry One"
+[apps.dashboard]
+url = "http://127.0.0.1:18001"
+
+[[apps]]
+id = "two"
+name = "Registry Two"
+[apps.dashboard]
+url = "http://127.0.0.1:18002"
+""",
+            encoding="utf-8",
+        )
+        with patch.dict(
+            os.environ,
+            {
+                "HOTPOT_APP_REGISTRY": str(registry),
+                "HOTPOT_DASHBOARD_INSTANCES": "not-json",
+                "HOTPOT_ADMIN_TOKEN": "collector-token",
+                "HOTPOT_DASHBOARD_TOKEN": "viewer-token",
+                "HOTPOT_DASHBOARD_DATA_DIR": self.tmp.name,
+            },
+            clear=False,
+        ):
+            dashboard = Dashboard()
+        self.assertEqual(
+            [(item.instance_id, item.name) for item in dashboard.instances],
+            [("one", "Registry One"), ("two", "Registry Two")],
+        )
+        self.assertEqual(dashboard.registry.source, str(registry))
+
+    def test_dashboard_uses_per_app_scoped_credentials_without_legacy_admin(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        (root / "one-collector").write_text("one-read\n", encoding="utf-8")
+        (root / "one-policy").write_text("one-write\n", encoding="utf-8")
+        (root / "two-collector").write_text("two-read\n", encoding="utf-8")
+        (root / "two-policy").write_text("two-write\n", encoding="utf-8")
+        registry = root / "apps.toml"
+        registry.write_text(
+            f"""
+[[apps]]
+id = "one"
+[apps.dashboard]
+url = "http://127.0.0.1:18001"
+[apps.credentials]
+collector_token_file = "{root / 'one-collector'}"
+policy_token_file = "{root / 'one-policy'}"
+
+[[apps]]
+id = "two"
+[apps.dashboard]
+url = "http://127.0.0.1:18002"
+[apps.credentials]
+collector_token_file = "{root / 'two-collector'}"
+policy_token_file = "{root / 'two-policy'}"
+""",
+            encoding="utf-8",
+        )
+        with patch.dict(
+            os.environ,
+            {
+                "HOTPOT_APP_REGISTRY": str(registry),
+                "HOTPOT_ADMIN_TOKEN": "",
+                "HOTPOT_DASHBOARD_TOKEN": "viewer-token",
+                "HOTPOT_DASHBOARD_DATA_DIR": self.tmp.name,
+            },
+            clear=False,
+        ):
+            dashboard = Dashboard()
+        self.assertEqual(dashboard.collector_token_for("one"), "one-read")
+        self.assertEqual(dashboard.policy_token_for("one"), "one-write")
+        self.assertEqual(dashboard.collector_token_for("two"), "two-read")
+        self.assertEqual(dashboard.policy_token_for("two"), "two-write")
+        self.assertIsNone(dashboard.hotpot_token)
+
     def test_dashboard_refuses_to_start_without_viewer_token(self) -> None:
         instances = [{"id": "one", "name": "One", "url": "http://127.0.0.1:18001"}]
         with tempfile.TemporaryDirectory() as tmp, patch.dict(

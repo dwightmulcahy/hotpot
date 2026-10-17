@@ -266,14 +266,10 @@ class HotpotServer(Hotpot):
             }
 
     def authorized(self, request: web.Request) -> bool:
-        token = self.settings.admin_token
-        if not token:
-            return False
-        from . import production as production_compat
+        return super().authorized(request)
 
-        return production_compat.hmac.compare_digest(
-            request.headers.get("Authorization", ""), f"Bearer {token}"
-        )
+    def authorized_policy(self, request: web.Request) -> bool:
+        return super().authorized_policy(request)
 
     async def live(self, request: web.Request) -> web.Response:
         return web.json_response(

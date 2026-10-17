@@ -35,7 +35,7 @@ class PolicyHotpotServer(ProductionDeceptionMixin, HotpotServer):
         )
 
     async def policy_update(self, request: web.Request) -> web.Response:
-        if not self.authorized(request):
+        if not self.authorized_policy(request):
             raise web.HTTPUnauthorized()
         if request.headers.get("X-Hotpot-Action", "") != "policy-sync":
             raise web.HTTPBadRequest(

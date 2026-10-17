@@ -14,7 +14,7 @@ from .cloudflare_enforcement import (
     CLOUDFLARE_API_BASE,
     CloudflareConfig,
     CloudflareEnforcer,
-    parse_cloudflare_targets,
+    CloudflareTarget,
 )
 from .geoip_enrichment import GeoIPEnricher
 from .response_enforcement_store import ApprovalResponsePolicy, EnforcementStore
@@ -69,9 +69,15 @@ class ProductionDashboard(core.Dashboard):
         self.cloudflare = CloudflareConfig(
             enabled=_env_bool("HOTPOT_CLOUDFLARE_ENFORCEMENT_ENABLED", False),
             api_token=os.getenv("HOTPOT_CLOUDFLARE_API_TOKEN", "").strip(),
-            targets=parse_cloudflare_targets(
-                os.getenv("HOTPOT_CLOUDFLARE_TARGETS", "")
-            ),
+            targets={
+                app.instance_id: CloudflareTarget(
+                    app.instance_id,
+                    app.cloudflare.zone_id,
+                    app.cloudflare.hosts,
+                )
+                for app in self.registry.apps
+                if app.cloudflare is not None
+            },
             api_base=os.getenv(
                 "HOTPOT_CLOUDFLARE_API_BASE", CLOUDFLARE_API_BASE
             ).strip()

@@ -24,6 +24,9 @@ class PolicyDeploymentTests(unittest.TestCase):
         self.assertIn("/api/manual-response/apply", guide)
         self.assertIn("last-known-good", guide)
         self.assertIn("Cloudflare enforcement remains approval-only", guide)
+        self.assertIn("scoped policy token", guide)
+        self.assertIn("collector token cannot write policy", guide)
+        self.assertNotIn("shared Hotpot admin token", guide)
 
 
 if __name__ == "__main__":
