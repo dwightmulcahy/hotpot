@@ -3,7 +3,7 @@ name: CI
 on:
   push:
     branches:
-      - "**"
+      - main
   pull_request:
   workflow_call:
 
@@ -11,6 +11,28 @@ permissions:
   contents: read
 
 jobs:
+  lint:
+    name: Ruff and Pyflakes
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install lint dependencies
+        run: python -m pip install --upgrade pip "ruff>=0.8" "pyflakes>=3.2"
+
+      - name: Run Ruff
+        run: python -m ruff check --select F hotpot dashboard tests .github/scripts
+
+      - name: Run Pyflakes
+        run: python -m pyflakes hotpot dashboard tests .github/scripts
+
   test:
     name: Python tests
     runs-on: ubuntu-latest
@@ -30,7 +52,7 @@ jobs:
       - name: Compile Python sources
         run: python -m compileall -q hotpot dashboard tests
 
-      - name: Run tests
+      - name: Run all tests
         run: python -m unittest discover -s tests -v
 
   test-python-314:
@@ -52,7 +74,7 @@ jobs:
       - name: Compile Python sources
         run: python -m compileall -q hotpot dashboard tests
 
-      - name: Run tests and reject leaked SQLite connections
+      - name: Run all tests and reject leaked SQLite connections
         shell: bash
         run: |
           set -o pipefail

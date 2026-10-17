@@ -55,18 +55,72 @@ class SupplyChainTests(unittest.TestCase):
         self.assertIn("version-update:semver-minor", config)
         self.assertIn("version-update:semver-major", config)
 
-    def test_ci_runs_on_every_branch_and_gates_releases(self) -> None:
+    def test_ci_avoids_duplicate_pr_runs_and_gates_releases(self) -> None:
         root = Path(__file__).resolve().parents[1]
         ci = (root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         release = (root / ".github" / "workflows" / "docker-publish.yml").read_text(
             encoding="utf-8"
         )
 
-        self.assertIn('branches:\n      - "**"', ci)
+        self.assertIn("push:\n    branches:\n      - main", ci)
+        self.assertIn("pull_request:", ci)
+        self.assertNotIn('branches:\n      - "**"', ci)
         self.assertIn("workflow_call:", ci)
+        self.assertIn("name: Ruff and Pyflakes", ci)
+        self.assertIn("python -m ruff check --select F hotpot dashboard tests .github/scripts", ci)
+        self.assertIn("python -m pyflakes hotpot dashboard tests .github/scripts", ci)
+        self.assertGreaterEqual(ci.count("-m unittest discover -s tests -v"), 2)
         self.assertIn("uses: ./.github/workflows/ci.yml", release)
+        self.assertRegex(release, r"(?ms)^  ci:\n.*?^    needs: validate-tag$")
         self.assertRegex(release, r"(?ms)^  publish:\n.*?^    needs: ci$")
         self.assertRegex(release, r"(?ms)^  release:\n.*?^    needs: publish$")
+
+    def test_release_publishes_semver_aliases_and_grouped_github_release(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        workflow = (root / ".github" / "workflows" / "docker-publish.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('tags:\n      - "v*.*.*"', workflow)
+        self.assertIn("^v[0-9]+\\.[0-9]+\\.[0-9]+$", workflow)
+        for docker_tag in (
+            "type=semver,pattern={{version}}",
+            "type=semver,pattern={{major}}.{{minor}}",
+            "type=semver,pattern={{major}}",
+            "type=raw,value=latest",
+        ):
+            self.assertEqual(
+                sum(
+                    1
+                    for line in workflow.splitlines()
+                    if line.strip() == docker_tag
+                ),
+                2,
+                f"both published images must receive Docker tag alias {docker_tag}",
+            )
+        self.assertIn("push: true", workflow)
+        self.assertIn("python .github/scripts/release_notes.py", workflow)
+        self.assertIn("Generate release notes from Conventional Commits", workflow)
+        self.assertIn('gh release create "${GITHUB_REF_NAME}"', workflow)
+        self.assertIn("--notes-file RELEASE_NOTES.md", workflow)
+
+        release_script = (
+            root / ".github" / "scripts" / "release_notes.py"
+        ).read_text(encoding="utf-8")
+        for group in (
+            '"breaking"',
+            '"feat"',
+            '"fix"',
+            '"perf"',
+            '"security"',
+            '"refactor"',
+            '"docs"',
+            '"test"',
+            '"build"',
+            '"ci"',
+            '"chore"',
+        ):
+            self.assertIn(group, release_script)
 
     def test_release_images_publish_sbom_provenance_and_github_attestations(self) -> None:
         root = Path(__file__).resolve().parents[1]

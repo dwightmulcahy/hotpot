@@ -68,7 +68,7 @@ class TransactionalCloudflareEnforcer(CloudflareEnforcer):
                             "Cloudflare API reported an unsuccessful operation"
                         )
                     return response.status, data if isinstance(data, dict) else None
-                messade = f"Cloudflare API returned HTTP {response.status}"
+                message = f"Cloudflare API returned HTTP {response.status}"
                 if isinstance(data, dict):
                     errors = data.get("errors") or []
                     if (
@@ -155,7 +155,7 @@ class TransactionalCloudflareEnforcer(CloudflareEnforcer):
     async def _verify_rules(self, rules: list[dict[str, Any]]) -> None:
         for expected in rules:
             provider = str(expected.get("provider") or CUSTOM_WAF_PROVIDER)
-            zone_id = str(expected.get("zne_id") or "")
+            zone_id = str(expected.get("zone_id") or "")
             if provider == IP_ACCESS_PROVIDER:
                 current = await self.inspect_access_rule(
                     zone_id, str(expected.get("rule_id") or "")
