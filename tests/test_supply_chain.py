@@ -64,9 +64,57 @@ class SupplyChainTests(unittest.TestCase):
 
         self.assertIn('branches:\n      - "**"', ci)
         self.assertIn("workflow_call:", ci)
+        self.assertIn("name: Ruff and Pyflakes", ci)
+        self.assertIn("python -m ruff check hotpot dashboard tests .github/scripts", ci)
+        self.assertIn("python -m pyflakes hotpot dashboard tests .github/scripts", ci)
+        self.assertGreaterEqual(ci.count("python -m unittest discover -s tests -v"), 2)
         self.assertIn("uses: ./.github/workflows/ci.yml", release)
+        self.assertRegex(release, r"(?ms)^  ci:\n.*?^    needs: validate-tag$")
         self.assertRegex(release, r"(?ms)^  publish:\n.*?^    needs: ci$")
         self.assertRegex(release, r"(?ms)^  release:\n.*?^    needs: publish$")
+
+    def test_release_publishes_semver_aliases_and_grouped_github_release(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        workflow = (root / ".github" / "workflows" / "docker-publish.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('tags:\n      - "v*.*.*"', workflow)
+        self.assertIn("^v[0-9]+\\.[0-9]+\\.[0-9]+$", workflow)
+        for docker_tag in (
+            "type=semver,pattern={{version}}",
+            "type=semver,pattern={{major}}.{{minor}}",
+            "type=semver,pattern={{major}}",
+            "type=raw,value=latest",
+        ):
+            self.assertEqual(
+                workflow.count(docker_tag),
+                2,
+                f"both published images must receive Docker tag alias {docker_tag}",
+            )
+        self.assertIn("push: true", workflow)
+        self.assertIn("python .github/scripts/release_notes.py", workflow)
+        self.assertIn("Generate release notes from Conventional Commits", workflow)
+        self.assertIn('gh release create "${GITHUB_REF_NAME}"', workflow)
+        self.assertIn("--notes-file RELEASE_NOTES.md", workflow)
+
+        release_script = (
+            root / ".github" / "scripts" / "release_notes.py"
+        ).read_text(encoding="utf-8")
+        for group in (
+            '"breaking"',
+            '"feat"',
+            '"fix"',
+            '"perf"',
+            '"security"',
+            '"refactor"',
+            '"docs"',
+            '"test"',
+            '"build"',
+            '"ci"',
+            '"chore"',
+        ):
+            self.assertIn(group, release_script)
 
     def test_release_images_publish_sbom_provenance_and_github_attestations(self) -> None:
         root = Path(__file__).resolve().parents[1]
