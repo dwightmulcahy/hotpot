@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
 import subprocess
 import sys
@@ -21,6 +22,7 @@ class QnapRegistryMigrationTests(unittest.TestCase):
         if not missing_smtp_secret:
             smtp.write_text("smtp-super-secret\n", encoding="utf-8")
 
+        container_user = f"{os.getuid()}:{os.getgid()}"
         compose.write_text(
             textwrap.dedent(
                 f"""\
@@ -28,7 +30,7 @@ class QnapRegistryMigrationTests(unittest.TestCase):
                   edge-alpha:
                     image: dwightmulcahy/hotpot:latest
                     network_mode: host
-                    user: "1000:100"
+                    user: "{container_user}"
                     env_file:
                       - {hotpot_env}
                     environment:
@@ -45,7 +47,7 @@ class QnapRegistryMigrationTests(unittest.TestCase):
                   edge-beta:
                     image: dwightmulcahy/hotpot:latest
                     network_mode: host
-                    user: "1000:100"
+                    user: "{container_user}"
                     env_file:
                       - {hotpot_env}
                     environment:
@@ -60,7 +62,7 @@ class QnapRegistryMigrationTests(unittest.TestCase):
                   command-center:
                     image: dwightmulcahy/hotpot-dashboard:latest
                     network_mode: host
-                    user: "1000:100"
+                    user: "{container_user}"
                     env_file:
                       - {dashboard_env}
                     volumes:
@@ -102,7 +104,7 @@ class QnapRegistryMigrationTests(unittest.TestCase):
             "services": {
                 "edge-alpha": {
                     "image": "dwightmulcahy/hotpot:latest",
-                    "user": "1000:100",
+                    "user": container_user,
                     "environment": {
                         "HOTPOT_BIND": "127.0.0.1",
                         "HOTPOT_PROFILES": "wordpress,secrets,git,php,generic",
@@ -120,7 +122,7 @@ class QnapRegistryMigrationTests(unittest.TestCase):
                 },
                 "edge-beta": {
                     "image": "dwightmulcahy/hotpot:latest",
-                    "user": "1000:100",
+                    "user": container_user,
                     "environment": {
                         "HOTPOT_BIND": "127.0.0.1",
                         "HOTPOT_PROFILES": "secrets,git,generic",
@@ -137,7 +139,7 @@ class QnapRegistryMigrationTests(unittest.TestCase):
                 },
                 "command-center": {
                     "image": "dwightmulcahy/hotpot-dashboard:latest",
-                    "user": "1000:100",
+                    "user": container_user,
                     "environment": {
                         "HOTPOT_ADMIN_TOKEN": "legacy-admin-super-secret",
                         "HOTPOT_DASHBOARD_TOKEN": "viewer-super-secret",
