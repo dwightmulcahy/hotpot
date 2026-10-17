@@ -100,6 +100,7 @@ class QnapRegistryMigrationTests(unittest.TestCase):
 
     def _docker(self, root: Path, compose: Path, hotpot_env: Path, dashboard_env: Path, secrets_dir: Path) -> Path:
         docker = root / "docker"
+        container_user = f"{os.getuid()}:{os.getgid()}"
         payload = {
             "services": {
                 "edge-alpha": {
