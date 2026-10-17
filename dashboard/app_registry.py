@@ -1,0 +1,200 @@
+from __future__ import annotations
+
+import os
+import re
+import tomllib
+from dataclasses import dataclass
+from pathlib import Path
+from urllib.parse import urlsplit
+
+
+_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+
+
+@dataclass(frozen=True)
+class RegistryCloudflare:
+    zone_id: str
+    hosts: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class RegistryApp:
+    instance_id: str
+    name: str
+    url: str
+    profiles: tuple[str, ...]
+    service: str | None
+    cloudflare: RegistryCloudflare | None
+
+
+@dataclass(frozen=True)
+class AppRegistry:
+    apps: tuple[RegistryApp, ...]
+    source: str
+
+    def by_id(self) -> dict[str, RegistryApp]:
+        return {app.instance_id: app for app in self.apps}
+
+
+def _required_table(value: object, *, context: str) -> dict:
+    if not isinstance(value, dict):
+        raise RuntimeError(f"{context} must be a TOML table")
+    return value
+
+
+def _clean_id(value: object) -> str:
+    instance_id = str(value or "").strip()
+    if not instance_id:
+        raise RuntimeError("Each app requires a non-empty id")
+    if not _ID_RE.fullmatch(instance_id):
+        raise RuntimeError(
+            f"Invalid app id {instance_id!r}; use lowercase letters, digits, '.', '_' or '-'"
+        )
+    return instance_id
+
+
+def _clean_url(value: object, *, instance_id: str) -> str:
+    url = str(value or "").strip().rstrip("/")
+    parsed = urlsplit(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise RuntimeError(
+            f"App {instance_id!r} dashboard.url must be an absolute http(s) URL"
+        )
+    if parsed.username or parsed.password:
+        raise RuntimeError(
+            f"App {instance_id!r} dashboard.url must not contain credentials"
+        )
+    return url
+
+
+def _clean_profiles(value: object, *, instance_id: str) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise RuntimeError(f"App {instance_id!r} profiles must be a TOML array")
+    profiles: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        profile = str(item or "").strip()
+        if not profile:
+            raise RuntimeError(f"App {instance_id!r} profiles may not contain blanks")
+        if profile not in seen:
+            profiles.append(profile)
+            seen.add(profile)
+    return tuple(profiles)
+
+
+def _clean_service(value: object, *, instance_id: str) -> str | None:
+    if value is None:
+        return None
+    service = str(value).strip()
+    if not service:
+        raise RuntimeError(
+            f"App {instance_id!r} deployment.service must not be blank"
+        )
+    return service
+
+
+def _clean_hosts(value: object, *, instance_id: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or not value:
+        raise RuntimeError(
+            f"App {instance_id!r} cloudflare.hosts must be a non-empty TOML array"
+        )
+    hosts: set[str] = set()
+    for item in value:
+        host = str(item or "").strip().lower().rstrip(".")
+        if (
+            not host
+            or "://" in host
+            or "/" in host
+            or any(ch.isspace() for ch in host)
+        ):
+            raise RuntimeError(
+                f"App {instance_id!r} has invalid Cloudflare hostname {item!r}"
+            )
+        hosts.add(host)
+    return tuple(sorted(hosts))
+
+
+def _parse_app(value: object) -> RegistryApp:
+    raw = _required_table(value, context="Each apps entry")
+    instance_id = _clean_id(raw.get("id"))
+    name = str(raw.get("name") or instance_id).strip()
+    if not name:
+        raise RuntimeError(f"App {instance_id!r} name must not be blank")
+
+    dashboard = _required_table(
+        raw.get("dashboard"), context=f"App {instance_id!r} dashboard"
+    )
+    url = _clean_url(dashboard.get("url"), instance_id=instance_id)
+    profiles = _clean_profiles(raw.get("profiles"), instance_id=instance_id)
+
+    deployment_raw = raw.get("deployment")
+    service = None
+    if deployment_raw is not None:
+        deployment = _required_table(
+            deployment_raw, context=f"App {instance_id!r} deployment"
+        )
+        service = _clean_service(
+            deployment.get("service"), instance_id=instance_id
+        )
+
+    cloudflare_raw = raw.get("cloudflare")
+    cloudflare = None
+    if cloudflare_raw is not None:
+        cloudflare_table = _required_table(
+            cloudflare_raw, context=f"App {instance_id!r} cloudflare"
+        )
+        zone_id = str(cloudflare_table.get("zone_id") or "").strip()
+        if not zone_id:
+            raise RuntimeError(
+                f"App {instance_id!r} cloudflare.zone_id is required"
+            )
+        hosts = _clean_hosts(
+            cloudflare_table.get("hosts"), instance_id=instance_id
+        )
+        cloudflare = RegistryCloudflare(zone_id=zone_id, hosts=hosts)
+
+    return RegistryApp(
+        instance_id=instance_id,
+        name=name,
+        url=url,
+        profiles=profiles,
+        service=service,
+        cloudflare=cloudflare,
+    )
+
+
+def parse_app_registry(raw: bytes | str, *, source: str = "<memory>") -> AppRegistry:
+    try:
+        payload = tomllib.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise RuntimeError(f"App registry {source} is not valid TOML: {exc}") from exc
+
+    apps_raw = payload.get("apps")
+    if not isinstance(apps_raw, list) or not apps_raw:
+        raise RuntimeError("App registry requires at least one [[apps]] entry")
+
+    apps: list[RegistryApp] = []
+    seen: set[str] = set()
+    for value in apps_raw:
+        app = _parse_app(value)
+        if app.instance_id in seen:
+            raise RuntimeError(f"Duplicate app id: {app.instance_id}")
+        seen.add(app.instance_id)
+        apps.append(app)
+
+    return AppRegistry(apps=tuple(apps), source=source)
+
+
+def load_app_registry(path: str | Path | None = None) -> AppRegistry:
+    selected = (
+        Path(path)
+        if path is not None
+        else Path(os.getenv("HOTPOT_APP_REGISTRY", "/config/apps.toml"))
+    )
+    try:
+        raw = selected.read_bytes()
+    except OSError as exc:
+        raise RuntimeError(f"Could not read app registry {selected}: {exc}") from exc
+    return parse_app_registry(raw, source=str(selected))

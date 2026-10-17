@@ -1,0 +1,35 @@
+# Central protected-application registry.
+#
+# The dashboard/control plane will use this file as the source of truth for
+# protected-app identity, dashboard endpoints, deployment mapping, profiles and
+# Cloudflare targets. Keep credentials in mounted secret files, not here.
+
+[[apps]]
+id = "app-one"
+name = "Example App One"
+profiles = ["wordpress", "secrets", "git", "php", "generic"]
+
+[apps.dashboard]
+url = "http://127.0.0.1:18081"
+
+[apps.deployment]
+service = "hotpot-app-one"
+
+[apps.cloudflare]
+zone_id = "REPLACE_APP_ONE_ZONE_ID"
+hosts = ["app-one.example.com"]
+
+[[apps]]
+id = "app-two"
+name = "Example App Two"
+profiles = ["secrets", "git", "php", "generic"]
+
+[apps.dashboard]
+url = "http://127.0.0.1:18082"
+
+[apps.deployment]
+service = "hotpot-app-two"
+
+[apps.cloudflare]
+zone_id = "REPLACE_APP_TWO_ZONE_ID"
+hosts = ["app-two.example.com"]
