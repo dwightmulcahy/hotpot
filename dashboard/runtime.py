@@ -237,7 +237,7 @@ class Dashboard:
     def __init__(self) -> None:
         self.registry = registry_from_environment()
         self.instances = instances_from_registry(self.registry)
-        self.hotpot_token = secret_from_env("HOTPOT_ADMIN_TOKEN")
+        self.hotpot_token = secret_from_env("HOTPOT_ADMIN_TOKEN") or None
         self._collector_tokens: dict[str, str] = {}
         self._policy_tokens: dict[str, str] = {}
         for app in self.registry.apps:
