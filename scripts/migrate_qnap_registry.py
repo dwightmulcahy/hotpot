@@ -54,6 +54,7 @@ class Discovery:
     dashboard_service: str
     compose_config: dict[str, Any]
     secrets_dir: Path
+    secrets_local_dir: Path
     container_uid: int | None
     container_gid: int | None
 
@@ -65,6 +66,61 @@ class Candidate:
     dashboard_env: str
     registry: str
     copied_secret_values: dict[str, str]
+
+
+@dataclass(frozen=True)
+class PathMapping:
+    qnap_root: Path
+    snapshot_root: Path | None = None
+
+    @property
+    def snapshot_mode(self) -> bool:
+        return self.snapshot_root is not None
+
+    def to_local(self, path: Path) -> Path:
+        path = path.expanduser()
+        if self.snapshot_root is None:
+            return path.resolve()
+        try:
+            relative = path.relative_to(self.qnap_root)
+        except ValueError as exc:
+            raise MigrationError(
+                f"Snapshot mode cannot read QNAP path outside {self.qnap_root}: {path}"
+            ) from exc
+        return (self.snapshot_root / relative).resolve()
+
+    def to_qnap(self, path: Path) -> Path:
+        path = path.expanduser().resolve()
+        if self.snapshot_root is None:
+            return path
+        try:
+            relative = path.relative_to(self.snapshot_root)
+        except ValueError:
+            try:
+                path.relative_to(self.qnap_root)
+            except ValueError as exc:
+                raise MigrationError(
+                    "Snapshot path is outside both the local snapshot and configured "
+                    f"QNAP root: {path}"
+                ) from exc
+            return path
+        return self.qnap_root / relative
+
+    def remap_text_for_local(self, text: str) -> str:
+        if self.snapshot_root is None:
+            return text
+        return text.replace(str(self.qnap_root), str(self.snapshot_root))
+
+    def assert_snapshot_write(self, path: Path) -> None:
+        if self.snapshot_root is None:
+            return
+        resolved = path.expanduser().resolve()
+        try:
+            resolved.relative_to(self.snapshot_root)
+        except ValueError as exc:
+            raise MigrationError(
+                f"Snapshot mode refuses to write outside {self.snapshot_root}: {resolved}"
+            ) from exc
 
 
 def _run(
@@ -89,18 +145,49 @@ def _run(
     return result
 
 
-def _compose_config(compose: Path, docker_bin: str) -> dict[str, Any]:
-    result = _run(
-        [
-            docker_bin,
-            "compose",
-            "-f",
-            str(compose),
-            "config",
-            "--format",
-            "json",
-        ]
+def _temporary_compose(
+    compose: Path,
+    text: str,
+    mapping: PathMapping,
+) -> Path:
+    compose.parent.mkdir(parents=True, exist_ok=True)
+    handle = tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        prefix=".hotpot-migrate-",
+        suffix=compose.suffix or ".yml",
+        dir=compose.parent,
+        delete=False,
     )
+    candidate = Path(handle.name)
+    with handle:
+        handle.write(mapping.remap_text_for_local(text))
+        handle.flush()
+        os.fsync(handle.fileno())
+    return candidate
+
+
+def _compose_config(
+    compose: Path,
+    text: str,
+    docker_bin: str,
+    mapping: PathMapping,
+) -> dict[str, Any]:
+    candidate = _temporary_compose(compose, text, mapping)
+    try:
+        result = _run(
+            [
+                docker_bin,
+                "compose",
+                "-f",
+                str(candidate),
+                "config",
+                "--format",
+                "json",
+            ]
+        )
+    finally:
+        candidate.unlink(missing_ok=True)
     try:
         payload = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
@@ -112,22 +199,14 @@ def _compose_config(compose: Path, docker_bin: str) -> dict[str, Any]:
     return payload
 
 
-def _validate_compose_text(compose: Path, text: str, docker_bin: str) -> None:
-    compose.parent.mkdir(parents=True, exist_ok=True)
-    handle = tempfile.NamedTemporaryFile(
-        mode="w",
-        encoding="utf-8",
-        prefix=".hotpot-migrate-",
-        suffix=compose.suffix or ".yml",
-        dir=compose.parent,
-        delete=False,
-    )
-    candidate = Path(handle.name)
+def _validate_compose_text(
+    compose: Path,
+    text: str,
+    docker_bin: str,
+    mapping: PathMapping,
+) -> None:
+    candidate = _temporary_compose(compose, text, mapping)
     try:
-        with handle:
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
         _run([docker_bin, "compose", "-f", str(candidate), "config", "-q"])
     finally:
         candidate.unlink(missing_ok=True)
@@ -531,6 +610,7 @@ def _discover(
     config: dict[str, Any],
     *,
     requested_secrets_dir: Path | None,
+    mapping: PathMapping,
 ) -> Discovery:
     services: dict[str, Any] = config["services"]
     cores: list[tuple[str, dict[str, Any], dict[str, str]]] = []
@@ -637,7 +717,7 @@ def _discover(
 
         source = _volume_source_for_target(service_config, "/run/secrets")
         if source:
-            secret_sources.add(source)
+            secret_sources.add(str(mapping.to_qnap(Path(source))))
         users.add(_parse_numeric_user(service_config.get("user")))
 
     unknown_instances = sorted(set(instances) - ids)
@@ -657,7 +737,9 @@ def _discover(
         dashboard_config, "/run/secrets"
     )
     if dashboard_secret_source:
-        secret_sources.add(dashboard_secret_source)
+        secret_sources.add(
+            str(mapping.to_qnap(Path(dashboard_secret_source)))
+        )
 
     if requested_secrets_dir is not None:
         secrets_dir = requested_secrets_dir
@@ -684,6 +766,7 @@ def _discover(
         dashboard_service=dashboard_service,
         compose_config=config,
         secrets_dir=secrets_dir,
+        secrets_local_dir=mapping.to_local(secrets_dir),
         container_uid=uid,
         container_gid=gid,
     )
@@ -826,7 +909,7 @@ def _build_candidate(
     retire_legacy: bool,
 ) -> Candidate:
     copied_secret_values = _shared_core_secret_values(
-        hotpot_env_text, secrets_dir=discovery.secrets_dir
+        hotpot_env_text, secrets_dir=discovery.secrets_local_dir
     )
     replacements: dict[str, str] = {}
     spans = _service_spans(compose_text)
@@ -1092,6 +1175,8 @@ def _print_plan(
     print(f"  dashboard env: {dashboard_env}")
     print(f"  registry:      {registry}")
     print(f"  secrets root:  {discovery.secrets_dir}")
+    if discovery.secrets_local_dir != discovery.secrets_dir:
+        print(f"  local secrets: {discovery.secrets_local_dir}")
     print(f"  applications:  {len(discovery.apps)}")
     for app in discovery.apps:
         print(
@@ -1147,6 +1232,7 @@ def _apply(
     registry: Path,
     backup_root: Path,
     docker_bin: str,
+    mapping: PathMapping,
 ) -> Path:
     backup_dir, backups = _backup_files(
         backup_root,
@@ -1155,7 +1241,7 @@ def _apply(
     created_secret_files: list[Path] = []
     try:
         for app in discovery.apps:
-            app_dir = discovery.secrets_dir / app.instance_id
+            app_dir = discovery.secrets_local_dir / app.instance_id
             app_dir.mkdir(parents=True, exist_ok=True)
             os.chmod(app_dir, 0o700)
             _apply_owner(
@@ -1206,7 +1292,9 @@ def _apply(
         _atomic_write(dashboard_env, candidate.dashboard_env)
         _atomic_write(compose, candidate.compose)
 
-        _run([docker_bin, "compose", "-f", str(compose), "config", "-q"])
+        _validate_compose_text(
+            compose, candidate.compose, docker_bin, mapping
+        )
 
         manifest = {
             "schema_version": 1,
@@ -1241,7 +1329,7 @@ def _apply(
         for path in reversed(created_secret_files):
             path.unlink(missing_ok=True)
         for app in discovery.apps:
-            app_dir = discovery.secrets_dir / app.instance_id
+            app_dir = discovery.secrets_local_dir / app.instance_id
             try:
                 app_dir.rmdir()
             except OSError:
@@ -1256,20 +1344,26 @@ def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
             "registry and per-app scoped credentials. Default mode is read-only."
         )
     )
+    parser.add_argument("--compose", type=Path)
+    parser.add_argument("--hotpot-env", type=Path)
+    parser.add_argument("--dashboard-env", type=Path)
     parser.add_argument(
-        "--compose",
+        "--snapshot-root",
         type=Path,
-        default=DEFAULT_CONFIG_DIR / "docker-compose.yml",
+        help=(
+            "Run against a local copy of the QNAP config tree. QNAP absolute "
+            "paths are remapped only for Compose validation; generated config "
+            "keeps the original QNAP paths."
+        ),
     )
     parser.add_argument(
-        "--hotpot-env",
+        "--qnap-config-root",
         type=Path,
-        default=DEFAULT_CONFIG_DIR / "hotpot.env",
-    )
-    parser.add_argument(
-        "--dashboard-env",
-        type=Path,
-        default=DEFAULT_CONFIG_DIR / "dashboard.env",
+        default=DEFAULT_CONFIG_DIR,
+        help=(
+            "QNAP config root represented by --snapshot-root "
+            f"(default: {DEFAULT_CONFIG_DIR})."
+        ),
     )
     parser.add_argument("--registry", type=Path)
     parser.add_argument("--secrets-dir", type=Path)
@@ -1298,28 +1392,87 @@ def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = _arguments(argv)
-    compose = args.compose.expanduser().resolve()
-    hotpot_env = args.hotpot_env.expanduser().resolve()
-    dashboard_env = args.dashboard_env.expanduser().resolve()
-    registry = (
-        args.registry.expanduser().resolve()
-        if args.registry
-        else compose.parent / "hotpot-apps.toml"
+    qnap_root = args.qnap_config_root.expanduser().resolve()
+    snapshot_root = (
+        args.snapshot_root.expanduser().resolve()
+        if args.snapshot_root is not None
+        else None
     )
-    backup_root = (
-        args.backup_dir.expanduser().resolve()
-        if args.backup_dir
-        else compose.parent / "hotpot-migration-backups"
-    )
-    requested_secrets = (
-        args.secrets_dir.expanduser().resolve() if args.secrets_dir else None
-    )
+    mapping = PathMapping(qnap_root=qnap_root, snapshot_root=snapshot_root)
+
+    if snapshot_root is not None:
+        compose = (
+            args.compose.expanduser().resolve()
+            if args.compose
+            else snapshot_root / "docker-compose.yml"
+        )
+        hotpot_env = (
+            args.hotpot_env.expanduser().resolve()
+            if args.hotpot_env
+            else snapshot_root / "hotpot.env"
+        )
+        dashboard_env = (
+            args.dashboard_env.expanduser().resolve()
+            if args.dashboard_env
+            else snapshot_root / "dashboard.env"
+        )
+        registry = (
+            args.registry.expanduser().resolve()
+            if args.registry
+            else snapshot_root / "hotpot-apps.toml"
+        )
+        backup_root = (
+            args.backup_dir.expanduser().resolve()
+            if args.backup_dir
+            else snapshot_root / "hotpot-migration-backups"
+        )
+        for path in (compose, hotpot_env, dashboard_env, registry, backup_root):
+            mapping.assert_snapshot_write(path)
+    else:
+        compose = (
+            args.compose.expanduser().resolve()
+            if args.compose
+            else qnap_root / "docker-compose.yml"
+        )
+        hotpot_env = (
+            args.hotpot_env.expanduser().resolve()
+            if args.hotpot_env
+            else qnap_root / "hotpot.env"
+        )
+        dashboard_env = (
+            args.dashboard_env.expanduser().resolve()
+            if args.dashboard_env
+            else qnap_root / "dashboard.env"
+        )
+        registry = (
+            args.registry.expanduser().resolve()
+            if args.registry
+            else qnap_root / "hotpot-apps.toml"
+        )
+        backup_root = (
+            args.backup_dir.expanduser().resolve()
+            if args.backup_dir
+            else qnap_root / "hotpot-migration-backups"
+        )
+
+    requested_secrets = None
+    if args.secrets_dir is not None:
+        raw_secrets = args.secrets_dir.expanduser().resolve()
+        requested_secrets = (
+            mapping.to_qnap(raw_secrets)
+            if snapshot_root is not None
+            else raw_secrets
+        )
+        if snapshot_root is not None:
+            mapping.assert_snapshot_write(mapping.to_local(requested_secrets))
 
     try:
         compose_text = _read_text(compose, "Compose file")
         hotpot_env_text = _read_text(hotpot_env, "Hotpot env file")
         dashboard_env_text = _read_text(dashboard_env, "dashboard env file")
-        config = _compose_config(compose, args.docker_bin)
+        config = _compose_config(
+            compose, compose_text, args.docker_bin, mapping
+        )
 
         migrated = _already_migrated(config, registry)
         if migrated and not args.retire_legacy and not args.force:
@@ -1339,18 +1492,33 @@ def main(argv: list[str] | None = None) -> int:
             )
 
         discovery = _discover(
-            config, requested_secrets_dir=requested_secrets
+            config,
+            requested_secrets_dir=requested_secrets,
+            mapping=mapping,
         )
+        if mapping.snapshot_mode:
+            mapping.assert_snapshot_write(discovery.secrets_local_dir)
         candidate = _build_candidate(
             compose_text=compose_text,
             hotpot_env_text=hotpot_env_text,
             dashboard_env_text=dashboard_env_text,
             discovery=discovery,
-            registry=registry,
+            registry=mapping.to_qnap(registry),
             retire_legacy=args.retire_legacy,
         )
 
-        _validate_compose_text(compose, candidate.compose, args.docker_bin)
+        _validate_compose_text(
+            compose, candidate.compose, args.docker_bin, mapping
+        )
+        if mapping.snapshot_mode:
+            print(
+                f"SNAPSHOT MODE: only files under {mapping.snapshot_root} "
+                "can be modified."
+            )
+            print(
+                f"  represents QNAP root: {mapping.qnap_root}"
+            )
+
         _print_plan(
             discovery,
             candidate,
@@ -1380,8 +1548,21 @@ def main(argv: list[str] | None = None) -> int:
             registry=registry,
             backup_root=backup_root,
             docker_bin=args.docker_bin,
+            mapping=mapping,
         )
-        if args.retire_legacy:
+        if mapping.snapshot_mode:
+            action = (
+                "legacy fallback retirement"
+                if args.retire_legacy
+                else "app-registry migration"
+            )
+            print(f"\n✓ Local snapshot {action} completed.")
+            print(f"  backup: {backup_dir}")
+            print("  LIVE QNAP FILES WERE NOT TOUCHED.")
+            print("  no containers were restarted.")
+            print("\nReview the local files with Git/diff before copying any")
+            print("approved configuration back to the QNAP.")
+        elif args.retire_legacy:
             print("\n✓ Legacy fallback retirement completed.")
             print(f"  backup: {backup_dir}")
             print("  containers were NOT restarted.")

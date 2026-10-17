@@ -393,6 +393,301 @@ class QnapRegistryMigrationTests(unittest.TestCase):
             )
             self.assertFalse((root / "hotpot-apps.toml").exists())
 
+    def _snapshot_fixture(self, root: Path):
+        qnap = Path("/share/Data/config/cloudflared")
+        secrets_dir = root / "secrets"
+        secrets_dir.mkdir()
+        (secrets_dir / "smtp_password").write_text(
+            "snapshot-smtp-secret\n", encoding="utf-8"
+        )
+        (root / "hotpot.env").write_text(
+            textwrap.dedent(
+                """\
+                HOTPOT_BIND=127.0.0.1
+                HOTPOT_PROFILES=wordpress,secrets,generic
+                HOTPOT_ADMIN_TOKEN=snapshot-admin-secret
+                HOTPOT_SMTP_PASSWORD_FILE=/run/secrets/smtp_password
+                """
+            ),
+            encoding="utf-8",
+        )
+        (root / "dashboard.env").write_text(
+            textwrap.dedent(
+                """\
+                HOTPOT_ADMIN_TOKEN=snapshot-admin-secret
+                HOTPOT_DASHBOARD_TOKEN=snapshot-viewer-secret
+                HOTPOT_DASHBOARD_DATA_DIR=/data
+                HOTPOT_DASHBOARD_INSTANCES=[{"id":"one","name":"One","url":"http://127.0.0.1:18081"}]
+                HOTPOT_CLOUDFLARE_TARGETS={"one":{"zone_id":"zone-one","hosts":["one.example.com"]}}
+                """
+            ),
+            encoding="utf-8",
+        )
+        container_user = f"{os.getuid()}:{os.getgid()}"
+        (root / "docker-compose.yml").write_text(
+            textwrap.dedent(
+                f"""\
+                services:
+                  gateway-one:
+                    image: dwightmulcahy/hotpot:latest
+                    user: "{container_user}"
+                    env_file:
+                      - {qnap / 'hotpot.env'}
+                    environment:
+                      HOTPOT_INSTANCE_ID: one
+                      HOTPOT_PORT: "18081"
+                      HOTPOT_UPSTREAM: http://127.0.0.1:8081
+                    volumes:
+                      - {qnap / 'hotpot-data/one'}:/data
+                      - {qnap / 'secrets'}:/run/secrets:ro
+
+                  command-center:
+                    image: dwightmulcahy/hotpot-dashboard:latest
+                    user: "{container_user}"
+                    env_file:
+                      - {qnap / 'dashboard.env'}
+                    environment:
+                      HOTPOT_DASHBOARD_DATA_DIR: /data
+                    volumes:
+                      - {qnap / 'hotpot-dashboard-data'}:/data
+                      - {qnap / 'secrets'}:/run/secrets:ro
+                """
+            ),
+            encoding="utf-8",
+        )
+        return qnap
+
+    def _snapshot_docker(self, root: Path, qnap: Path) -> Path:
+        docker = root / "docker"
+        log = root / "docker-calls.jsonl"
+        container_user = f"{os.getuid()}:{os.getgid()}"
+        payload = {
+            "services": {
+                "gateway-one": {
+                    "image": "dwightmulcahy/hotpot:latest",
+                    "user": container_user,
+                    "environment": {
+                        "HOTPOT_BIND": "127.0.0.1",
+                        "HOTPOT_PROFILES": "wordpress,secrets,generic",
+                        "HOTPOT_ADMIN_TOKEN": "snapshot-admin-secret",
+                        "HOTPOT_SMTP_PASSWORD_FILE": "/run/secrets/smtp_password",
+                        "HOTPOT_INSTANCE_ID": "one",
+                        "HOTPOT_PORT": "18081",
+                        "HOTPOT_UPSTREAM": "http://127.0.0.1:8081",
+                    },
+                    "volumes": [
+                        {
+                            "type": "bind",
+                            "source": str(root / "hotpot-data/one"),
+                            "target": "/data",
+                        },
+                        {
+                            "type": "bind",
+                            "source": str(root / "secrets"),
+                            "target": "/run/secrets",
+                            "read_only": True,
+                        },
+                    ],
+                },
+                "command-center": {
+                    "image": "dwightmulcahy/hotpot-dashboard:latest",
+                    "user": container_user,
+                    "environment": {
+                        "HOTPOT_ADMIN_TOKEN": "snapshot-admin-secret",
+                        "HOTPOT_DASHBOARD_TOKEN": "snapshot-viewer-secret",
+                        "HOTPOT_DASHBOARD_DATA_DIR": "/data",
+                        "HOTPOT_DASHBOARD_INSTANCES": '[{"id":"one","name":"One","url":"http://127.0.0.1:18081"}]',
+                        "HOTPOT_CLOUDFLARE_TARGETS": '{"one":{"zone_id":"zone-one","hosts":["one.example.com"]}}',
+                    },
+                    "volumes": [
+                        {
+                            "type": "bind",
+                            "source": str(root / "hotpot-dashboard-data"),
+                            "target": "/data",
+                        },
+                        {
+                            "type": "bind",
+                            "source": str(root / "secrets"),
+                            "target": "/run/secrets",
+                            "read_only": True,
+                        },
+                    ],
+                },
+            }
+        }
+        encoded = json.dumps(payload)
+        docker.write_text(
+            textwrap.dedent(
+                f"""\
+                #!{sys.executable}
+                import json
+                import pathlib
+                import sys
+
+                root = pathlib.Path({str(root)!r})
+                qnap = {str(qnap)!r}
+                log = root / "docker-calls.jsonl"
+                args = sys.argv[1:]
+                with log.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(args) + "\\n")
+                if args[:1] != ["compose"]:
+                    raise SystemExit(2)
+                candidate = pathlib.Path(args[args.index("-f") + 1])
+                text = candidate.read_text(encoding="utf-8")
+                if qnap in text:
+                    print("unmapped QNAP path remained in validation file", file=sys.stderr)
+                    raise SystemExit(5)
+                if str(root) not in text:
+                    print("snapshot root was not substituted", file=sys.stderr)
+                    raise SystemExit(6)
+                if "--format" in args and "json" in args:
+                    print({encoded!r})
+                    raise SystemExit(0)
+                if "config" in args and "-q" in args:
+                    raise SystemExit(0)
+                raise SystemExit(3)
+                """
+            ),
+            encoding="utf-8",
+        )
+        docker.chmod(0o755)
+        return docker
+
+    def test_snapshot_plan_remaps_qnap_paths_only_for_validation(self) -> None:
+        root_repo = Path(__file__).resolve().parents[1]
+        script = root_repo / "scripts" / "migrate_qnap_registry.py"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            qnap = self._snapshot_fixture(root)
+            docker = self._snapshot_docker(root, qnap)
+            before = {
+                path: path.read_bytes()
+                for path in (
+                    root / "docker-compose.yml",
+                    root / "hotpot.env",
+                    root / "dashboard.env",
+                )
+            }
+            result = self._run(
+                script,
+                [
+                    "--snapshot-root", str(root),
+                    "--docker-bin", str(docker),
+                ],
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertIn("SNAPSHOT MODE", result.stdout)
+            self.assertIn("PLAN ONLY", result.stdout)
+            self.assertIn(str(qnap / "hotpot-apps.toml"), result.stdout)
+            self.assertNotIn("snapshot-admin-secret", result.stdout)
+            self.assertNotIn("snapshot-viewer-secret", result.stdout)
+            self.assertNotIn("snapshot-smtp-secret", result.stdout)
+            for path, data in before.items():
+                self.assertEqual(path.read_bytes(), data)
+            self.assertFalse((root / "hotpot-apps.toml").exists())
+
+            calls = [
+                json.loads(line)
+                for line in (root / "docker-calls.jsonl").read_text(
+                    encoding="utf-8"
+                ).splitlines()
+            ]
+            self.assertTrue(calls)
+            for call in calls:
+                self.assertIn("config", call)
+                self.assertNotIn("up", call)
+                self.assertNotIn("restart", call)
+                self.assertNotIn("pull", call)
+
+    def test_snapshot_apply_only_changes_local_tree_and_preserves_qnap_mounts(self) -> None:
+        root_repo = Path(__file__).resolve().parents[1]
+        script = root_repo / "scripts" / "migrate_qnap_registry.py"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            qnap = self._snapshot_fixture(root)
+            docker = self._snapshot_docker(root, qnap)
+            outside = root.parent / f"{root.name}-outside-marker"
+            outside.unlink(missing_ok=True)
+
+            result = self._run(
+                script,
+                [
+                    "--snapshot-root", str(root),
+                    "--docker-bin", str(docker),
+                    "--apply",
+                ],
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertIn("LIVE QNAP FILES WERE NOT TOUCHED", result.stdout)
+            self.assertIn("Review the local files", result.stdout)
+
+            compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
+            self.assertIn(
+                f"{qnap / 'hotpot-apps.toml'}:/config/apps.toml:ro",
+                compose,
+            )
+            self.assertIn(
+                f"{qnap / 'secrets/one'}:/run/secrets/one:ro",
+                compose,
+            )
+            self.assertNotIn(
+                f"{root / 'hotpot-apps.toml'}:/config/apps.toml:ro",
+                compose,
+            )
+            registry = (root / "hotpot-apps.toml").read_text(encoding="utf-8")
+            self.assertIn('service = "gateway-one"', registry)
+            self.assertTrue((root / "secrets/one/collector_token").is_file())
+            self.assertTrue((root / "secrets/one/policy_token").is_file())
+            self.assertEqual(
+                (root / "secrets/one/smtp_password")
+                .read_text(encoding="utf-8")
+                .strip(),
+                "snapshot-smtp-secret",
+            )
+            self.assertFalse(outside.exists())
+            backups = list(
+                (root / "hotpot-migration-backups").glob(
+                    "*/migration-manifest.json"
+                )
+            )
+            self.assertEqual(len(backups), 1)
+
+            calls = [
+                json.loads(line)
+                for line in (root / "docker-calls.jsonl").read_text(
+                    encoding="utf-8"
+                ).splitlines()
+            ]
+            self.assertGreaterEqual(len(calls), 2)
+            self.assertTrue(all("config" in call for call in calls))
+            forbidden = {"up", "down", "restart", "pull", "rm", "stop"}
+            self.assertFalse(
+                any(forbidden.intersection(call) for call in calls)
+            )
+
+    def test_snapshot_mode_refuses_output_paths_outside_snapshot(self) -> None:
+        root_repo = Path(__file__).resolve().parents[1]
+        script = root_repo / "scripts" / "migrate_qnap_registry.py"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            qnap = self._snapshot_fixture(root)
+            docker = self._snapshot_docker(root, qnap)
+            outside = root.parent / f"{root.name}-outside.toml"
+            outside.unlink(missing_ok=True)
+            result = self._run(
+                script,
+                [
+                    "--snapshot-root", str(root),
+                    "--registry", str(outside),
+                    "--docker-bin", str(docker),
+                    "--apply",
+                ],
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("refuses to write outside", result.stderr)
+            self.assertFalse(outside.exists())
+
+
     def test_missing_referenced_shared_secret_fails_before_writes(self) -> None:
         root_repo = Path(__file__).resolve().parents[1]
         script = root_repo / "scripts" / "migrate_qnap_registry.py"
