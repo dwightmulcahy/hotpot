@@ -5,9 +5,9 @@
 #   - protected applications already listen on host ports
 #   - Hotpot should be inserted between cloudflared and those existing ports
 #
-# Add one hotpot-<instance-id> service per protected application. The two
-# services below are examples only; rename them and change ports/upstreams to
-# match your deployment.
+# Add one Hotpot core service per protected application. Service names are operator
+# choices; io.hotpot.* labels and hotpot-apps.toml carry Hotpot identity/role.
+# The two services below are examples only.
 #
 # Unlike compose.cloudflare.example.yml, this does not create Docker bridge
 # networks or move the protected applications into this Compose project.
@@ -22,6 +22,8 @@
 #   - Keep Hotpot listeners on 127.0.0.1 when cloudflared reaches them locally.
 #   - Set HOTPOT_IMAGE_TAG to an immutable release tag for production deployments.
 #     `latest` remains the fallback only so the example is easy to start.
+#   - Each core receives only its own scoped credential directory. The dashboard
+#     receives the full secrets tree because it must collect from/manage every core.
 #   - Third-party infrastructure images below are pinned by version and manifest
 #     digest so an upstream tag move cannot silently replace a tested image.
 
@@ -44,13 +46,14 @@ services:
     env_file:
       - /share/Data/config/cloudflared/hotpot.env
     environment:
+      HOTPOT_APP_REGISTRY: /config/apps.toml
       HOTPOT_INSTANCE_ID: app-one
-      HOTPOT_INSTANCE_NAME: Example App One
       HOTPOT_PORT: "18081"
       HOTPOT_UPSTREAM: "http://127.0.0.1:8081"
     volumes:
+      - /share/Data/config/cloudflared/hotpot-apps.toml:/config/apps.toml:ro
       - /share/Data/config/cloudflared/hotpot-data/app-one:/data
-      - /share/Data/config/cloudflared/secrets:/run/secrets:ro
+      - /share/Data/config/cloudflared/secrets/app-one:/run/secrets/app-one:ro
     read_only: true
     tmpfs:
       - /tmp:size=16m,mode=1777
@@ -60,6 +63,9 @@ services:
       - ALL
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
+      - "io.hotpot.managed=true"
+      - "io.hotpot.role=core"
+      - "io.hotpot.instance-id=app-one"
 
   hotpot-app-two:
     image: dwightmulcahy/hotpot:${HOTPOT_IMAGE_TAG:-latest}
@@ -70,13 +76,14 @@ services:
     env_file:
       - /share/Data/config/cloudflared/hotpot.env
     environment:
+      HOTPOT_APP_REGISTRY: /config/apps.toml
       HOTPOT_INSTANCE_ID: app-two
-      HOTPOT_INSTANCE_NAME: Example App Two
       HOTPOT_PORT: "18082"
       HOTPOT_UPSTREAM: "http://127.0.0.1:8082"
     volumes:
+      - /share/Data/config/cloudflared/hotpot-apps.toml:/config/apps.toml:ro
       - /share/Data/config/cloudflared/hotpot-data/app-two:/data
-      - /share/Data/config/cloudflared/secrets:/run/secrets:ro
+      - /share/Data/config/cloudflared/secrets/app-two:/run/secrets/app-two:ro
     read_only: true
     tmpfs:
       - /tmp:size=16m,mode=1777
@@ -86,6 +93,9 @@ services:
       - ALL
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
+      - "io.hotpot.managed=true"
+      - "io.hotpot.role=core"
+      - "io.hotpot.instance-id=app-two"
 
   # Official MaxMind updater. It downloads immediately on first start and then
   # checks every GEOIPUPDATE_FREQUENCY hours. Checks with no new release do not
@@ -115,7 +125,10 @@ services:
     user: "1000:100"
     env_file:
       - /share/Data/config/cloudflared/dashboard.env
+    environment:
+      HOTPOT_APP_REGISTRY: /config/apps.toml
     volumes:
+      - /share/Data/config/cloudflared/hotpot-apps.toml:/config/apps.toml:ro
       - /share/Data/config/cloudflared/hotpot-dashboard-data:/data
       - /share/Data/config/cloudflared/geoip:/geoip:ro
       - /share/Data/config/cloudflared/secrets:/run/secrets:ro
@@ -128,6 +141,8 @@ services:
       - ALL
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
+      - "io.hotpot.managed=true"
+      - "io.hotpot.role=dashboard"
 
 # Update Cloudflare Tunnel routes so each public hostname points to its Hotpot
 # listener rather than directly to the protected application, for example:

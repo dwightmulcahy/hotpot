@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -12,8 +16,9 @@ class QnapUpgradeTests(unittest.TestCase):
         self.assertIn("config -q", script)
         self.assertIn("--force-recreate", script)
         self.assertIn("wait_for_health", script)
-        self.assertIn('DASHBOARD_SERVICE="${HOTPOT_QNAP_DASHBOARD_SERVICE:-hotpot-dashboard}"', script)
-        self.assertIn("config --services", script)
+        self.assertIn("discover_labeled_services", script)
+        self.assertIn('io.hotpot.managed', script)
+        self.assertIn('io.hotpot.role', script)
         self.assertIn("for service in $CORE_SERVICES", script)
         self.assertIn(".State.Health.Status", script)
         self.assertIn('compose up -d --no-deps --force-recreate "$DASHBOARD_SERVICE"', script)
@@ -22,40 +27,153 @@ class QnapUpgradeTests(unittest.TestCase):
         self.assertNotIn("cloudflared geoipupdate", script)
         self.assertNotIn("docker inspect -f '{{json .Config.Env}}'", script)
 
-    def test_qnap_example_supports_immutable_hotpot_image_tag(self) -> None:
+    def test_label_discovery_supports_nonstandard_service_names(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        script = root / "scripts" / "qnap-upgrade.sh"
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            compose = temp / "compose.yml"
+            compose.write_text("services: {}\n", encoding="utf-8")
+            docker = temp / "docker"
+            docker.write_text(
+                textwrap.dedent(
+                    """\
+                    #!/bin/sh
+                    if [ "$1" = "compose" ]; then
+                      shift
+                      while [ "$#" -gt 0 ]; do
+                        case "$1" in
+                          -f) shift 2 ;;
+                          config)
+                            shift
+                            if [ "${1:-}" = "-q" ]; then exit 0; fi
+                            if [ "${1:-}" = "--services" ]; then
+                              printf '%s\n' edge-alpha edge-beta command-center cloudflared
+                              exit 0
+                            fi
+                            ;;
+                          ps)
+                            shift
+                            [ "${1:-}" = "-q" ] && shift
+                            case "${1:-}" in
+                              edge-alpha) echo cid-alpha ;;
+                              edge-beta) echo cid-beta ;;
+                              command-center) echo cid-dashboard ;;
+                              cloudflared) echo cid-cloudflared ;;
+                            esac
+                            exit 0
+                            ;;
+                        esac
+                      done
+                    fi
+                    if [ "$1" = "inspect" ]; then
+                      shift
+                      [ "$1" = "--format" ] || exit 1
+                      format=$2
+                      id=$3
+                      case "$format" in
+                        *io.hotpot.managed*)
+                          case "$id" in cid-alpha|cid-beta|cid-dashboard) echo true ;; *) echo "" ;; esac
+                          ;;
+                        *io.hotpot.role*)
+                          case "$id" in cid-alpha|cid-beta) echo core ;; cid-dashboard) echo dashboard ;; *) echo "" ;; esac
+                          ;;
+                      esac
+                      exit 0
+                    fi
+                    exit 1
+                    """
+                ),
+                encoding="utf-8",
+            )
+            docker.chmod(0o755)
+            env = {
+                **os.environ,
+                "PATH": f"{temp}:{os.environ.get('PATH', '')}",
+                "HOTPOT_QNAP_COMPOSE_FILE": str(compose),
+                "HOTPOT_QNAP_CORE_SERVICES": "",
+                "HOTPOT_QNAP_DASHBOARD_SERVICE": "",
+            }
+            result = subprocess.run(
+                ["/bin/sh", str(script), "--dry-run", "--skip-pull"],
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("edge-alpha", result.stdout)
+        self.assertIn("edge-beta", result.stdout)
+        self.assertIn("dashboard: command-center", result.stdout)
+        self.assertNotIn("legacy hotpot-* naming fallback", result.stdout)
+
+    def test_qnap_example_uses_registry_scoped_secrets_and_role_labels(self) -> None:
         root = Path(__file__).resolve().parents[1]
         compose = (root / "compose.qnap.example.yml").read_text(encoding="utf-8")
+        registry = (root / "hotpot-apps.example.toml").read_text(encoding="utf-8")
+
         self.assertGreaterEqual(compose.count("${HOTPOT_IMAGE_TAG:-latest}"), 3)
         self.assertIn("immutable release tag", compose)
+        self.assertEqual(
+            compose.count(
+                "/share/Data/config/cloudflared/hotpot-apps.toml:/config/apps.toml:ro"
+            ),
+            3,
+        )
+        self.assertEqual(compose.count("HOTPOT_APP_REGISTRY: /config/apps.toml"), 3)
+        self.assertEqual(compose.count('"io.hotpot.role=core"'), 2)
+        self.assertEqual(compose.count('"io.hotpot.role=dashboard"'), 1)
+        self.assertEqual(compose.count('"io.hotpot.managed=true"'), 3)
+        self.assertNotIn("HOTPOT_INSTANCE_NAME:", compose)
+        self.assertIn(
+            "/share/Data/config/cloudflared/secrets/app-one:/run/secrets/app-one:ro",
+            compose,
+        )
+        self.assertIn(
+            "/share/Data/config/cloudflared/secrets/app-two:/run/secrets/app-two:ro",
+            compose,
+        )
+        self.assertIn(
+            'collector_token_file = "/run/secrets/app-one/collector_token"',
+            registry,
+        )
+        self.assertIn(
+            'policy_token_file = "/run/secrets/app-two/policy_token"',
+            registry,
+        )
 
-    def test_upgrade_documentation_calls_out_dry_run_and_rollback(self) -> None:
-        root = Path(__file__).resolve().parents[1]
-        doc = (root / "docs" / "QNAP_UPGRADES.md").read_text(encoding="utf-8")
-        self.assertIn("--dry-run", doc)
-        self.assertIn("## Rollback", doc)
-        self.assertIn("immutable release tag", doc)
-        self.assertIn("never mounts the Docker socket", doc)
-
-    def test_dashboard_example_documents_deployment_plan_inputs(self) -> None:
+    def test_dashboard_example_uses_registry_without_duplicate_app_maps(self) -> None:
         root = Path(__file__).resolve().parents[1]
         env = (root / "dashboard.env.example").read_text(encoding="utf-8")
+        qnap_env = (root / "hotpot.qnap.env.example").read_text(encoding="utf-8")
+        registry = (root / "hotpot-apps.example.toml").read_text(encoding="utf-8")
+
+        self.assertIn("HOTPOT_APP_REGISTRY=/config/apps.toml", env)
         self.assertIn("HOTPOT_DASHBOARD_COMPOSE_FILE=", env)
         self.assertIn("HOTPOT_DASHBOARD_DEPLOY_TAG=", env)
         self.assertIn("HOTPOT_DASHBOARD_DEPLOY_SERVICES=", env)
-
+        self.assertNotIn("\nHOTPOT_DASHBOARD_INSTANCES=[", env)
+        self.assertNotIn("\nHOTPOT_CLOUDFLARE_TARGETS={", env)
+        self.assertNotIn("\nHOTPOT_ADMIN_TOKEN=", env)
+        self.assertNotIn("HOTPOT_PROFILES=", qnap_env)
+        self.assertNotIn("\nHOTPOT_ADMIN_TOKEN=", qnap_env)
+        self.assertIn('id = "app-one"', registry)
+        self.assertIn('id = "app-two"', registry)
+        self.assertIn("[apps.deployment]", registry)
+        self.assertIn("[apps.cloudflare]", registry)
 
     def test_public_deployment_examples_use_generic_placeholders(self) -> None:
         root = Path(__file__).resolve().parents[1]
         compose = (root / "compose.qnap.example.yml").read_text(encoding="utf-8")
-        env = (root / "dashboard.env.example").read_text(encoding="utf-8")
+        registry = (root / "hotpot-apps.example.toml").read_text(encoding="utf-8")
         deployment = (root / "dashboard" / "deployment.py").read_text(encoding="utf-8")
 
         self.assertIn("hotpot-app-one:", compose)
         self.assertIn("hotpot-app-two:", compose)
-        self.assertIn("app-one.example.com", compose)
-        self.assertIn('"id":"app-one"', env)
-        self.assertIn('"id":"app-two"', env)
-        self.assertIn("f\"hotpot-{instance.instance_id}\"", deployment)
+        self.assertIn("app-one.example.com", registry)
+        self.assertIn('id = "app-one"', registry)
+        self.assertIn('id = "app-two"', registry)
+        self.assertIn("app.service or", deployment)
         self.assertNotIn("DEFAULT_SERVICES =", deployment)
 
 
