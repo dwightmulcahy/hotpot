@@ -459,7 +459,6 @@ class QnapRegistryMigrationTests(unittest.TestCase):
 
     def _snapshot_docker(self, root: Path, qnap: Path) -> Path:
         docker = root / "docker"
-        log = root / "docker-calls.jsonl"
         container_user = f"{os.getuid()}:{os.getgid()}"
         payload = {
             "services": {
