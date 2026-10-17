@@ -242,7 +242,7 @@ class QnapRegistryMigrationTests(unittest.TestCase):
             ]
             result = self._run(script, args)
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
-            self.assertIn("Configuration migration completed", result.stdout)
+            self.assertIn("App-registry migration staged", result.stdout)
             self.assertIn("containers were NOT restarted", result.stdout)
 
             registry = root / "hotpot-apps.toml"
