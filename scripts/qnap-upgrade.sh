@@ -8,9 +8,9 @@ DEPLOYMENT_DIR="${HOTPOT_QNAP_DEPLOYMENT_DIR:-/share/Data/config/cloudflared/hot
 DRY_RUN=0
 SKIP_PULL=0
 
-CORE_SERVICES="hotpot-monkeyhead hotpot-watersolver hotpot-hvac hotpot-tapmenu"
-DASHBOARD_SERVICE="hotpot-dashboard"
-ALL_SERVICES="$CORE_SERVICES $DASHBOARD_SERVICE"
+CORE_SERVICES="${HOTPOT_QNAP_CORE_SERVICES:-}"
+DASHBOARD_SERVICE="${HOTPOT_QNAP_DASHBOARD_SERVICE:-hotpot-dashboard}"
+ALL_SERVICES=""
 
 usage() {
   cat <<'EOF'
@@ -26,6 +26,9 @@ Options:
   --tag TAG          Hotpot Docker tag supplied as HOTPOT_IMAGE_TAG (default: latest)
   --wait SECONDS     Health timeout per service (default: 90)
   --deployment-dir PATH  Directory for deployment manifests
+  --services LIST    Space-separated Hotpot core Compose services
+                     (default: auto-discover hotpot-* services)
+  --dashboard-service NAME  Dashboard Compose service (default: hotpot-dashboard)
   --skip-pull        Do not pull images before recreation
   --dry-run          Print the rollout without changing containers
   -h, --help         Show this help
@@ -52,6 +55,16 @@ while [ "$#" -gt 0 ]; do
     --deployment-dir)
       [ "$#" -ge 2 ] || { echo "--deployment-dir requires a path" >&2; exit 2; }
       DEPLOYMENT_DIR=$2
+      shift 2
+      ;;
+    --services)
+      [ "$#" -ge 2 ] || { echo "--services requires a space-separated list" >&2; exit 2; }
+      CORE_SERVICES=$2
+      shift 2
+      ;;
+    --dashboard-service)
+      [ "$#" -ge 2 ] || { echo "--dashboard-service requires a service name" >&2; exit 2; }
+      DASHBOARD_SERVICE=$2
       shift 2
       ;;
     --skip-pull)
@@ -95,38 +108,39 @@ compose() {
   HOTPOT_IMAGE_TAG="$IMAGE_TAG" docker compose -f "$COMPOSE_FILE" "$@"
 }
 
-health_url() {
-  case "$1" in
-    hotpot-monkeyhead) echo "http://127.0.0.1:18088/_hotpot/health" ;;
-    hotpot-watersolver) echo "http://127.0.0.1:12120/_hotpot/health" ;;
-    hotpot-hvac) echo "http://127.0.0.1:18080/_hotpot/health" ;;
-    hotpot-tapmenu) echo "http://127.0.0.1:18111/_hotpot/health" ;;
-    hotpot-dashboard) echo "http://127.0.0.1:19090/health" ;;
-    *) return 1 ;;
-  esac
+container_id_for_service() {
+  HOTPOT_IMAGE_TAG="$IMAGE_TAG" docker compose -f "$COMPOSE_FILE" ps -q "$1"
 }
 
 wait_for_health() {
   service=$1
-  url=$(health_url "$service")
   if [ "$DRY_RUN" -eq 1 ]; then
-    echo "+ wait up to ${WAIT_SECONDS}s for $url"
+    echo "+ wait up to ${WAIT_SECONDS}s for $service Docker healthcheck"
     return 0
   fi
 
   elapsed=0
   while [ "$elapsed" -lt "$WAIT_SECONDS" ]; do
-    if curl -fsS --max-time 3 "$url" >/dev/null 2>&1; then
-      echo "✓ $service healthy ($url)"
-      return 0
+    container_id=$(container_id_for_service "$service")
+    if [ -n "$container_id" ]; then
+      has_health=$(docker inspect --format '{{if .State.Health}}yes{{else}}no{{end}}' "$container_id" 2>/dev/null || echo no)
+      status=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$container_id" 2>/dev/null || echo unknown)
+      if [ "$has_health" = "yes" ] && [ "$status" = "healthy" ]; then
+        echo "✓ $service healthy"
+        return 0
+      fi
+      if [ "$has_health" = "no" ] && [ "$status" = "running" ]; then
+        echo "✓ $service running (no Docker HEALTHCHECK configured)"
+        return 0
+      fi
     fi
     sleep 2
     elapsed=$((elapsed + 2))
   done
 
   echo "ERROR: $service did not become healthy within ${WAIT_SECONDS}s" >&2
-  echo "Last container logs:" >&2
-  docker logs --tail 80 "$service" >&2 2>&1 || true
+  echo "Last service logs:" >&2
+  HOTPOT_IMAGE_TAG="$IMAGE_TAG" docker compose -f "$COMPOSE_FILE" logs --tail 80 "$service" >&2 2>&1 || true
   return 1
 }
 
@@ -141,7 +155,12 @@ record_manifest() {
     echo "hotpot_image_tag=$IMAGE_TAG"
     echo "compose_file=$COMPOSE_FILE"
     for service in $ALL_SERVICES; do
-      docker inspect --format '{{.Name}} image={{.Config.Image}} image_id={{.Image}} started={{.State.StartedAt}}' "$service" 2>/dev/null || echo "$service inspect=unavailable"
+      container_id=$(container_id_for_service "$service")
+      if [ -n "$container_id" ]; then
+        docker inspect --format '{{.Name}} image={{.Config.Image}} image_id={{.Image}} started={{.State.StartedAt}}' "$container_id" 2>/dev/null || echo "$service inspect=unavailable"
+      else
+        echo "$service inspect=unavailable"
+      fi
     done
   } > "$manifest"
   chmod 600 "$manifest" 2>/dev/null || true
@@ -153,8 +172,22 @@ echo "  compose: $COMPOSE_FILE"
 echo "  tag:     $IMAGE_TAG"
 [ "$IMAGE_TAG" = "latest" ] && echo "  warning: latest is mutable; an immutable release tag is safer for rollback"
 
-# Parse/interpolate the exact Compose before touching any container.
-compose config -q
+# Parse/interpolate the exact Compose before touching any container. This still
+# runs during --dry-run because validation and service discovery are read-only.
+echo_cmd config -q
+HOTPOT_IMAGE_TAG="$IMAGE_TAG" docker compose -f "$COMPOSE_FILE" config -q
+
+if [ -z "$CORE_SERVICES" ]; then
+  CORE_SERVICES=$(HOTPOT_IMAGE_TAG="$IMAGE_TAG" docker compose -f "$COMPOSE_FILE" config --services | awk -v dashboard="$DASHBOARD_SERVICE" '$0 ~ /^hotpot-/ && $0 != dashboard {print}')
+fi
+[ -n "$CORE_SERVICES" ] || {
+  echo "No Hotpot core services found. Use --services or HOTPOT_QNAP_CORE_SERVICES." >&2
+  exit 1
+}
+ALL_SERVICES="$CORE_SERVICES $DASHBOARD_SERVICE"
+
+echo "  cores:   $CORE_SERVICES"
+echo "  dashboard: $DASHBOARD_SERVICE"
 
 if [ "$SKIP_PULL" -eq 0 ]; then
   compose pull $ALL_SERVICES
