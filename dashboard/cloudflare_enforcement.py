@@ -24,6 +24,21 @@ from .cloudflare_ip_access import (
 )
 
 
+__all__ = [
+    "CLOUDFLARE_API_BASE",
+    "CUSTOM_RULE_PHASE",
+    "CUSTOM_WAF_PROVIDER",
+    "HOT_POT_ACCESS_NOTES_PREFIX",
+    "IP_ACCESS_PROVIDER",
+    "CloudflareConfig",
+    "CloudflareEnforcementError",
+    "CloudflareEnforcer",
+    "CloudflareTarget",
+    "build_expression",
+    "parse_cloudflare_targets",
+]
+
+
 @dataclass(frozen=True)
 class CloudflareConfig(_LegacyConfig):
     def public_status(self) -> dict[str, Any]:
