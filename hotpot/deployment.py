@@ -118,6 +118,8 @@ def deployment_snapshot(
         },
         "secret_sources": {
             "admin_token": _secret_source("HOTPOT_ADMIN_TOKEN"),
+            "collector_token": _secret_source("HOTPOT_COLLECTOR_TOKEN"),
+            "policy_token": _secret_source("HOTPOT_POLICY_TOKEN"),
             "smtp_password": _secret_source("HOTPOT_SMTP_PASSWORD"),
             "webhook_bearer": _secret_source("HOTPOT_NOTIFY_WEBHOOK_BEARER"),
         },

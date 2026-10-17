@@ -26,6 +26,8 @@ class CoreSecretFileTests(unittest.TestCase):
             root = Path(tmp)
             values = {
                 "HOTPOT_ADMIN_TOKEN": "admin-file",
+                "HOTPOT_COLLECTOR_TOKEN": "collector-file",
+                "HOTPOT_POLICY_TOKEN": "policy-file",
                 "HOTPOT_NOTIFY_WEBHOOK_BEARER": "webhook-file",
                 "HOTPOT_SMTP_PASSWORD": "smtp-file",
             }
@@ -38,6 +40,8 @@ class CoreSecretFileTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=False):
                 settings = Settings.from_env()
             self.assertEqual(settings.admin_token, "admin-file")
+            self.assertEqual(settings.collector_token, "collector-file")
+            self.assertEqual(settings.policy_token, "policy-file")
             self.assertEqual(settings.notify_webhook_bearer, "webhook-file")
             self.assertEqual(settings.smtp_password, "smtp-file")
 

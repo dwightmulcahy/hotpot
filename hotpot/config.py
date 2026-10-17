@@ -68,6 +68,8 @@ class Settings:
     smtp_password: str | None
     smtp_from: str | None
     smtp_to: tuple[str, ...]
+    collector_token: str | None = None
+    policy_token: str | None = None
     instance_id: str = "hotpot"
     instance_name: str = "hotpot"
 
@@ -112,6 +114,8 @@ class Settings:
             smtp_password=env_secret("HOTPOT_SMTP_PASSWORD"),
             smtp_from=os.getenv("HOTPOT_SMTP_FROM") or None,
             smtp_to=env_csv("HOTPOT_SMTP_TO"),
+            collector_token=env_secret("HOTPOT_COLLECTOR_TOKEN"),
+            policy_token=env_secret("HOTPOT_POLICY_TOKEN"),
             instance_id=instance_id,
             instance_name=instance_name,
         )

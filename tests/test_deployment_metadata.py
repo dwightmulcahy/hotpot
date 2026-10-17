@@ -31,13 +31,19 @@ class DeploymentMetadataTests(unittest.TestCase):
                     "HOTPOT_INSTANCE_ID": "monkeyhead",
                     "HOTPOT_INSTANCE_NAME": "Monkey Head Brewing",
                     "HOTPOT_ADMIN_TOKEN_FILE": str(secret),
+                    "HOTPOT_COLLECTOR_TOKEN": "collector-secret",
+                    "HOTPOT_POLICY_TOKEN": "policy-secret",
                     "HOTPOT_SMTP_PASSWORD": "very-secret-smtp-password",
                 }
             )
         encoded = json.dumps(snapshot, sort_keys=True)
         self.assertNotIn("very-secret-admin-token", encoded)
         self.assertNotIn("very-secret-smtp-password", encoded)
+        self.assertNotIn("collector-secret", encoded)
+        self.assertNotIn("policy-secret", encoded)
         self.assertEqual(snapshot["secret_sources"]["admin_token"], "file")
+        self.assertEqual(snapshot["secret_sources"]["collector_token"], "environment")
+        self.assertEqual(snapshot["secret_sources"]["policy_token"], "environment")
         self.assertEqual(snapshot["secret_sources"]["smtp_password"], "environment")
         self.assertEqual(snapshot["secret_sources"]["webhook_bearer"], "unset")
 
