@@ -149,16 +149,13 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Generate release notes from Conventional Commits
-        env:
-          GITHUB_REPOSITORY: ${{ github.repository }}
-        run: |
-          python scripts/standard_release_notes.py \
-            --tag "${GITHUB_REF_NAME}" \
-            --project-name "Hotpot" \
-            --image "dwightmulcahy/hotpot" \
-            --output RELEASE_NOTES.md
-
+      - name: Generate conventional release notes
+        uses: dwightmulcahy/repo-template/.github/actions/release-notes@f3dc1af2146156866574485a20ded5ac35d08a88
+        with:
+          tag: "${GITHUB_REF_NAME}"
+          project-name: "Hotpot"
+          image: "dwightmulcahy/hotpot"
+          output: "RELEASE_NOTES.md"
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
