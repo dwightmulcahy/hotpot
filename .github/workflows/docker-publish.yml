@@ -153,8 +153,10 @@ jobs:
         env:
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
-          python .github/scripts/release_notes.py \
+          python scripts/standard_release_notes.py \
             --tag "${GITHUB_REF_NAME}" \
+            --project-name "Hotpot" \
+            --image "dwightmulcahy/hotpot" \
             --output RELEASE_NOTES.md
 
       - name: Create GitHub release
