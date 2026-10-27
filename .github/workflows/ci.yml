@@ -12,26 +12,15 @@ permissions:
 
 jobs:
   lint:
-    name: Ruff and Pyflakes
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v7
-
-      - name: Set up Python
-        uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
-          cache: pip
-
-      - name: Install lint dependencies
-        run: python -m pip install --upgrade pip "ruff>=0.8" "pyflakes>=3.2"
-
-      - name: Run Ruff
-        run: python -m ruff check --select F hotpot dashboard tests .github/scripts
-
-      - name: Run Pyflakes
-        run: python -m pyflakes hotpot dashboard tests .github/scripts
+    name: Shared Python lint
+    uses: dwightmulcahy/repo-template/.github/workflows/reusable-python-ci.yml@d89e9db45ba77fd32d95da02620476eada9c01cd
+    with:
+      python-version: '3.12'
+      install-command: python -m pip install --upgrade pip "ruff>=0.8" "pyflakes>=3.2"
+      lint-command: |
+        python -m ruff check --select F hotpot dashboard tests .github/scripts
+        python -m pyflakes hotpot dashboard tests .github/scripts
+      test-command: python -m compileall -q hotpot dashboard tests
 
   test:
     name: Python tests
