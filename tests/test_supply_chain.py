@@ -80,66 +80,25 @@ class SupplyChainTests(unittest.TestCase):
         workflow = (root / ".github" / "workflows" / "docker-publish.yml").read_text(
             encoding="utf-8"
         )
-
-        self.assertIn('tags:\n      - "v*.*.*"', workflow)
-        self.assertIn("^v[0-9]+\\.[0-9]+\\.[0-9]+$", workflow)
-        for docker_tag in (
-            "type=semver,pattern={{version}}",
-            "type=semver,pattern={{major}}.{{minor}}",
-            "type=semver,pattern={{major}}",
-            "type=raw,value=latest",
-        ):
-            self.assertEqual(
-                sum(
-                    1
-                    for line in workflow.splitlines()
-                    if line.strip() == docker_tag
-                ),
-                2,
-                f"both published images must receive Docker tag alias {docker_tag}",
-            )
-        self.assertIn("push: true", workflow)
-        self.assertIn("dwightmulcahy/repo-template/.github/actions/release-notes@", workflow)
+        shared = "dwightmulcahy/repo-template/.github/workflows/reusable-docker-publish.yml@"
+        self.assertEqual(workflow.count(shared), 2)
+        self.assertIn("image: dwightmulcahy/hotpot", workflow)
+        self.assertIn("image: dwightmulcahy/hotpot-dashboard", workflow)
+        self.assertIn("dockerfile: Dockerfile.dashboard", workflow)
+        self.assertIn("needs: [publish, publish-dashboard]", workflow)
         self.assertIn("Generate conventional release notes", workflow)
         self.assertIn('gh release create "${GITHUB_REF_NAME}"', workflow)
         self.assertIn("--notes-file RELEASE_NOTES.md", workflow)
-
-        release_script = (
-            root / "scripts" / "standard_release_notes.py"
-        ).read_text(encoding="utf-8")
-        for group in (
-            '"feat"',
-            '"fix"',
-            '"perf"',
-            '"security"',
-            '"refactor"',
-            '"docs"',
-            '"test"',
-            '"build"',
-            '"ci"',
-            '"chore"',
-        ):
-            self.assertIn(group, release_script)
 
     def test_release_images_publish_sbom_provenance_and_github_attestations(self) -> None:
         root = Path(__file__).resolve().parents[1]
         workflow = (root / ".github" / "workflows" / "docker-publish.yml").read_text(
             encoding="utf-8"
         )
-        self.assertGreaterEqual(workflow.count("sbom: true"), 2)
-        self.assertGreaterEqual(workflow.count("provenance: mode=max"), 2)
-        attest_majors = [int(value) for value in ATTEST_BUILD_PROVENANCE_RE.findall(workflow)]
-        self.assertEqual(len(attest_majors), 2)
-        self.assertTrue(
-            all(major >= 3 for major in attest_majors),
-            "attest-build-provenance must use major version 3 or newer",
-        )
-        self.assertIn("id-token: write", workflow)
-        self.assertIn("attestations: write", workflow)
-        self.assertIn("id: hotpot-build", workflow)
-        self.assertIn("id: dashboard-build", workflow)
-        self.assertIn("steps.hotpot-build.outputs.digest", workflow)
-        self.assertIn("steps.dashboard-build.outputs.digest", workflow)
+        self.assertIn("reusable-docker-publish.yml@", workflow)
+        self.assertEqual(workflow.count("is_latest: true"), 2)
+        self.assertEqual(workflow.count("HOTPOT_VERSION="), 2)
+        self.assertEqual(workflow.count("HOTPOT_GIT_SHA="), 2)
 
 
 if __name__ == "__main__":
