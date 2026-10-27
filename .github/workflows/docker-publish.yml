@@ -18,7 +18,14 @@ jobs:
   validate-tag:
     name: Validate release tag
     runs-on: ubuntu-latest
+    outputs:
+      publish_major: ${{ steps.aliases.outputs.major }}
+      publish_minor: ${{ steps.aliases.outputs.minor }}
+      publish_latest: ${{ steps.aliases.outputs.latest }}
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
       - name: Require vM.m.p semantic version tag
         shell: bash
         run: |
@@ -26,6 +33,30 @@ jobs:
             echo "Release tags must match vM.m.p (for example v1.2.3)."
             exit 1
           fi
+
+      - name: Select independent stable aliases
+        id: aliases
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --force --tags origin
+          current="${GITHUB_REF_NAME#v}"
+          major="${current%%.*}"
+          minor="${current%.*}"
+          stable_tags="$(git tag --list | sed -nE 's/^v([0-9]+\\.[0-9]+\\.[0-9]+)$/\\1/p')"
+          for scope in major minor latest; do
+            case "$scope" in
+              major) candidates="$(printf '%s\\n' "$stable_tags" | awk -F. -v m="$major" '$1==m')" ;;
+              minor) candidates="$(printf '%s\\n' "$stable_tags" | awk -F. -v m="$major" -v n="${minor#*.}" '$1==m && $2==n')" ;;
+              latest) candidates="$stable_tags" ;;
+            esac
+            highest="$(printf '%s\\n' "$candidates" | sed '/^$/d' | sort -V | tail -n 1)"
+            if [[ "$current" == "$highest" ]]; then
+              echo "$scope=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "$scope=false" >> "$GITHUB_OUTPUT"
+            fi
+          done
 
   ci:
     name: Verify release candidate
@@ -35,12 +66,14 @@ jobs:
 
   publish:
     name: Publish Hotpot image
-    needs: ci
-    uses: dwightmulcahy/repo-template/.github/workflows/reusable-docker-publish.yml@d0730dfedd3dd9754d7bb442dbbbe567fe5b4bfd
+    needs: [ci, validate-tag]
+    uses: dwightmulcahy/repo-template/.github/workflows/reusable-docker-publish.yml@0ecc636387ef04b46acf232b3a9ef49cc2980eca
     with:
       image: dwightmulcahy/hotpot
       tag: ${{ github.ref_name }}
-      is_latest: true
+      publish_major: ${{ needs.validate-tag.outputs.publish_major == 'true' }}
+      publish_minor: ${{ needs.validate-tag.outputs.publish_minor == 'true' }}
+      publish_latest: ${{ needs.validate-tag.outputs.publish_latest == 'true' }}
       build_args: |
         HOTPOT_VERSION=${{ github.ref_name }}
         HOTPOT_GIT_SHA=${{ github.sha }}
@@ -50,13 +83,15 @@ jobs:
 
   publish-dashboard:
     name: Publish Hotpot dashboard
-    needs: ci
-    uses: dwightmulcahy/repo-template/.github/workflows/reusable-docker-publish.yml@d0730dfedd3dd9754d7bb442dbbbe567fe5b4bfd
+    needs: [ci, validate-tag]
+    uses: dwightmulcahy/repo-template/.github/workflows/reusable-docker-publish.yml@0ecc636387ef04b46acf232b3a9ef49cc2980eca
     with:
       image: dwightmulcahy/hotpot-dashboard
       dockerfile: Dockerfile.dashboard
       tag: ${{ github.ref_name }}
-      is_latest: true
+      publish_major: ${{ needs.validate-tag.outputs.publish_major == 'true' }}
+      publish_minor: ${{ needs.validate-tag.outputs.publish_minor == 'true' }}
+      publish_latest: ${{ needs.validate-tag.outputs.publish_latest == 'true' }}
       build_args: |
         HOTPOT_VERSION=${{ github.ref_name }}
         HOTPOT_GIT_SHA=${{ github.sha }}
