@@ -100,7 +100,7 @@ class SupplyChainTests(unittest.TestCase):
             )
         self.assertIn("push: true", workflow)
         self.assertIn("dwightmulcahy/repo-template/.github/actions/release-notes@", workflow)
-        self.assertIn("Generate release notes from Conventional Commits", workflow)
+        self.assertIn("Generate conventional release notes", workflow)
         self.assertIn('gh release create "${GITHUB_REF_NAME}"', workflow)
         self.assertIn("--notes-file RELEASE_NOTES.md", workflow)
 
