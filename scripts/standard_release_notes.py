@@ -62,7 +62,13 @@ def commit_subjects(tag: str, previous: str | None) -> list[tuple[str, str, str]
     for record in output.split("\x1e"):
         parts = record.strip().split("\x1f")
         if len(parts) >= 2:
-            records.append((parts[0].strip(), parts[1].strip(), parts[2].strip() if len(parts) >= 3 else ""))
+            records.append(
+                (
+                    parts[0].strip(),
+                    parts[1].strip(),
+                    parts[2].strip() if len(parts) >= 3 else "",
+                )
+            )
     return records
 
 
@@ -107,16 +113,18 @@ def render(tag: str, repository: str, project_name: str, image: str) -> str:
     remaining = [entry for entries in grouped.values() for entry in entries]
     if remaining:
         lines.extend(["## 🔧 Other changes", "", *remaining, ""])
-    lines.extend([
-        "## 🐳 Docker",
-        "",
-        "```bash",
-        f"docker pull {image}:{version}",
-        "```",
-        "",
-        "Multi-architecture image: `linux/amd64` and `linux/arm64`.",
-        "",
-    ])
+    lines.extend(
+        [
+            "## 🐳 Docker",
+            "",
+            "```bash",
+            f"docker pull {image}:{version}",
+            "```",
+            "",
+            "Multi-architecture image: `linux/amd64` and `linux/arm64`.",
+            "",
+        ]
+    )
     if repository and previous:
         lines.append(
             f"**Full changelog:** https://github.com/{repository}/compare/{previous}...{tag}"
