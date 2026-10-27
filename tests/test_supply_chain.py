@@ -73,7 +73,7 @@ class SupplyChainTests(unittest.TestCase):
         self.assertIn("uses: ./.github/workflows/ci.yml", release)
         self.assertRegex(release, r"(?ms)^  ci:\n.*?^    needs: validate-tag$")
         self.assertRegex(release, r"(?ms)^  publish:\n.*?^    needs: ci$")
-        self.assertRegex(release, r"(?ms)^  release:\n.*?^    needs: publish$")
+        self.assertRegex(release, r"(?ms)^  release:\n.*?^    needs: \[publish, publish-dashboard\]$")
 
     def test_release_publishes_semver_aliases_and_grouped_github_release(self) -> None:
         root = Path(__file__).resolve().parents[1]
