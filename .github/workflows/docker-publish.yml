@@ -43,14 +43,14 @@ jobs:
           current="${GITHUB_REF_NAME#v}"
           major="${current%%.*}"
           minor="${current%.*}"
-          stable_tags="$(git tag --list | sed -nE 's/^v([0-9]+\\.[0-9]+\\.[0-9]+)$/\\1/p')"
+          stable_tags="$(git tag --list | sed -nE 's/^v([0-9]+\.[0-9]+\.[0-9]+)$/\1/p')"
           for scope in major minor latest; do
             case "$scope" in
-              major) candidates="$(printf '%s\\n' "$stable_tags" | awk -F. -v m="$major" '$1==m')" ;;
-              minor) candidates="$(printf '%s\\n' "$stable_tags" | awk -F. -v m="$major" -v n="${minor#*.}" '$1==m && $2==n')" ;;
+              major) candidates="$(printf '%s\n' "$stable_tags" | awk -F. -v m="$major" '$1==m')" ;;
+              minor) candidates="$(printf '%s\n' "$stable_tags" | awk -F. -v m="$major" -v n="${minor#*.}" '$1==m && $2==n')" ;;
               latest) candidates="$stable_tags" ;;
             esac
-            highest="$(printf '%s\\n' "$candidates" | sed '/^$/d' | sort -V | tail -n 1)"
+            highest="$(printf '%s\n' "$candidates" | sed '/^$/d' | sort -V | tail -n 1)"
             if [[ "$current" == "$highest" ]]; then
               echo "$scope=true" >> "$GITHUB_OUTPUT"
             else
@@ -123,6 +123,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            echo "Release already exists; nothing to create."
+            exit 0
+          fi
           gh release create "${GITHUB_REF_NAME}" \
             --title "Hotpot ${GITHUB_REF_NAME}" \
             --notes-file RELEASE_NOTES.md \
