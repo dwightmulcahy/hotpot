@@ -77,7 +77,7 @@ class SupplyChainTests(unittest.TestCase):
         self.assertGreaterEqual(ci.count("-m unittest discover -s tests -v"), 2)
         self.assertIn("uses: ./.github/workflows/ci.yml", release)
         self.assertRegex(release, r"(?ms)^  ci:\n.*?^    needs: validate-tag$")
-        self.assertRegex(release, r"(?ms)^  publish:\n.*?^    needs: ci$")
+        self.assertRegex(release, r"(?ms)^  publish:\n.*?^    needs: \[ci, validate-tag\]$")
         self.assertRegex(release, r"(?ms)^  release:\n.*?^    needs: \[publish, publish-dashboard\]$")
 
     def test_release_publishes_semver_aliases_and_grouped_github_release(self) -> None:
@@ -101,7 +101,10 @@ class SupplyChainTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("reusable-docker-publish.yml@", workflow)
-        self.assertEqual(workflow.count("is_latest: true"), 2)
+        for alias in ("publish_major", "publish_minor", "publish_latest"):
+            self.assertEqual(workflow.count(f"      {alias}: "), 2)
+            self.assertIn(f"needs.validate-tag.outputs.{alias}", workflow)
+        self.assertNotIn("is_latest: true", workflow)
         self.assertEqual(workflow.count("HOTPOT_VERSION="), 2)
         self.assertEqual(workflow.count("HOTPOT_GIT_SHA="), 2)
 
