@@ -99,7 +99,7 @@ class SupplyChainTests(unittest.TestCase):
                 f"both published images must receive Docker tag alias {docker_tag}",
             )
         self.assertIn("push: true", workflow)
-        self.assertIn("python scripts/standard_release_notes.py", workflow)
+        self.assertIn("dwightmulcahy/repo-template/.github/actions/release-notes@", workflow)
         self.assertIn("Generate release notes from Conventional Commits", workflow)
         self.assertIn('gh release create "${GITHUB_REF_NAME}"', workflow)
         self.assertIn("--notes-file RELEASE_NOTES.md", workflow)
