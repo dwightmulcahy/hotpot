@@ -66,7 +66,12 @@ class SupplyChainTests(unittest.TestCase):
         self.assertIn("pull_request:", ci)
         self.assertNotIn('branches:\n      - "**"', ci)
         self.assertIn("workflow_call:", ci)
-        self.assertIn("name: Ruff and Pyflakes", ci)
+        self.assertIn("name: Shared Python lint", ci)
+        self.assertRegex(
+            ci,
+            r"uses: dwightmulcahy/repo-template/\.github/workflows/"
+            r"reusable-python-ci\.yml@[0-9a-f]{40}",
+        )
         self.assertIn("python -m ruff check --select F hotpot dashboard tests .github/scripts", ci)
         self.assertIn("python -m pyflakes hotpot dashboard tests .github/scripts", ci)
         self.assertGreaterEqual(ci.count("-m unittest discover -s tests -v"), 2)
