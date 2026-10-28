@@ -102,7 +102,7 @@ class SupplyChainTests(unittest.TestCase):
         )
         self.assertIn("reusable-docker-publish.yml@", workflow)
         for alias in ("publish_major", "publish_minor", "publish_latest"):
-            self.assertEqual(workflow.count(f"      {alias}: "), 2)
+            self.assertEqual(workflow.count(f"      {alias}: "), 3)
             self.assertIn(f"needs.validate-tag.outputs.{alias}", workflow)
         self.assertNotIn("is_latest: true", workflow)
         self.assertEqual(workflow.count("HOTPOT_VERSION="), 2)
