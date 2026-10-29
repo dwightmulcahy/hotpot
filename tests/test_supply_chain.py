@@ -107,6 +107,19 @@ class SupplyChainTests(unittest.TestCase):
         self.assertNotIn("is_latest: true", workflow)
         self.assertEqual(workflow.count("HOTPOT_VERSION="), 2)
         self.assertEqual(workflow.count("HOTPOT_GIT_SHA="), 2)
+        self.assertEqual(workflow.count("HOTPOT_BUILD_DATE="), 2)
+        self.assertIn(
+            'echo "build_date=$(git show -s --format=%cI "$GITHUB_SHA")" >> "$GITHUB_OUTPUT"',
+            workflow,
+        )
+        self.assertIn(
+            "build_date: ${{ steps.build-metadata.outputs.build_date }}",
+            workflow,
+        )
+        self.assertEqual(
+            workflow.count("HOTPOT_BUILD_DATE=${{ needs.validate-tag.outputs.build_date }}"),
+            2,
+        )
 
 
 if __name__ == "__main__":

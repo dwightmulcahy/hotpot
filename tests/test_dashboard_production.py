@@ -169,6 +169,15 @@ hosts = ["WWW.Example.COM"]
         self.assertIn("data-expires-at", PRODUCTION_HTML)
         self.assertIn("updateCountdowns", PRODUCTION_HTML)
 
+    def test_deployment_dates_degrade_cleanly_when_metadata_is_unknown(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        script = (root / "dashboard" / "static" / "deployment.js").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("raw.toLowerCase()==='unknown'", script)
+        self.assertIn("Number.isNaN(parsed.getTime())?'Unknown'", script)
+        self.assertNotIn("try{return new Date(value).toLocaleString()}", script)
+
     def test_dashboard_image_copies_server_header_hardening(self) -> None:
         root = Path(__file__).resolve().parents[1]
         dockerfile = (root / "Dockerfile.dashboard").read_text(encoding="utf-8")

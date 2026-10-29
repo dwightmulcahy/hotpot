@@ -23,7 +23,7 @@
   function statusBadge(status){const cls=status==='pass'?'pass':status==='fail'?'fail':'warning';return `<span class="badge ${cls}">${h(status)}</span>`}
   function yesNoUnknown(value){return value===true?'yes':value===false?'no':'unknown'}
   function buildText(row){const version=String(row?.version||'unknown');const sha=short(row?.git_sha,10);return `${version} · ${sha}`}
-  function dateText(value){if(!value)return 'none';try{return new Date(value).toLocaleString()}catch(e){return String(value)}}
+  function dateText(value){const raw=String(value??'').trim();if(!raw||raw.toLowerCase()==='unknown')return 'Unknown';const parsed=new Date(raw);return Number.isNaN(parsed.getTime())?'Unknown':parsed.toLocaleString()}
 
   function ensureDeploymentView(){
     if(!document.querySelector('.tab[data-view="deployment"]')){
