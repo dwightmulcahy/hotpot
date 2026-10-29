@@ -9,6 +9,7 @@ from pathlib import Path
 
 from dashboard.auto_response import (
     AutoResponseConfig,
+    AutoResponseController,
     AutoResponseStateStore,
     evaluate_candidate,
 )
@@ -147,6 +148,63 @@ class AutoResponsePolicyTests(unittest.TestCase):
         )
         self.assertFalse(result["eligible"])
         self.assertIn("required", result["reason"])
+
+
+class AutoResponseControllerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_mode_rejection_is_retained_and_audited(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            class Store:
+                def __init__(self, path: Path):
+                    self.path = path
+                    self.audit = []
+
+                async def record_dashboard_action(self, **kwargs):
+                    self.audit.append(kwargs)
+
+            class ResponsePolicy:
+                enabled = True
+                active_window_hours = 24
+
+            class Cloudflare:
+                configured = True
+                can_remove = True
+
+            class Dashboard:
+                def __init__(self, path: Path):
+                    self.store = Store(path)
+                    self.response_policy = ResponsePolicy()
+                    self.cloudflare = Cloudflare()
+
+                async def _maybe_reconcile_cloudflare(self, *, force=False):
+                    return {
+                        "status": "healthy",
+                        "rollback_cleanup_pending": 1,
+                        "orphaned": 0,
+                    }
+
+            path = Path(tmp) / "dashboard.sqlite3"
+            dashboard = Dashboard(path)
+            controller = AutoResponseController(dashboard)
+
+            with self.assertRaisesRegex(
+                ValueError, "rollback cleanup jobs are pending"
+            ):
+                await controller.set_mode("challenge", principal="hotpot")
+
+            # Background state changes must not erase the operator-facing rejection.
+            controller.last_circuit = {
+                "status": "standby",
+                "reason": "no pending recommendations",
+            }
+            status = await controller.status()
+            self.assertEqual(status["circuit_breaker"]["status"], "standby")
+            rejection = status["last_mode_change_rejection"]
+            self.assertIsNotNone(rejection)
+            assert rejection is not None
+            self.assertEqual(rejection["attempted_mode"], "challenge")
+            self.assertIn("rollback cleanup jobs are pending", rejection["reason"])
+            self.assertEqual(dashboard.store.audit[0]["event_type"], "auto_response_mode_rejected")
+            self.assertEqual(dashboard.store.audit[0]["status"], "rejected")
 
 
 class AutoResponseStateStoreTests(unittest.TestCase):

@@ -38,9 +38,10 @@
   }
   function render(status){
     const target=ensurePanel();if(!target)return;
-    const cfg=status.config||{},counts=status.counts||{},circuit=status.circuit_breaker||{};
+    const cfg=status.config||{},counts=status.counts||{},circuit=status.circuit_breaker||{},rejection=status.last_mode_change_rejection||null;
     const buttons=MODES.map(([mode,label])=>`<button class="btn ${status.mode===mode?'primary':'ghost'}" data-auto-mode="${mode}" type="button" ${status.mode===mode?'disabled':''}>${esc(label)}</button>`).join('');
     const shadow=status.mode==='shadow'?`<div>Shadow age</div><div>${esc(age(status.shadow_age_hours))} / ${(status.recommended_shadow_hours||168)/24}d recommended</div>`:'';
+    const rejected=rejection?`<div>Last mode-change blocker</div><div class="warn">${esc(rejection.reason||'rejected')}${rejection.checked_at?' · '+esc(new Date(rejection.checked_at).toLocaleString()):''}</div>`:'';
     target.innerHTML=`
       <div class="panel-head">
         <div><div class="section-kicker">Guarded automation</div><h2>Automatic response</h2></div>
@@ -55,6 +56,7 @@
         <div>Verified bots</div><div>${cfg.exclude_verified_bots?'Excluded':'Not excluded'}</div>
         <div>7-day long blocks</div><div>Manual approval only</div>
         ${shadow}
+        ${rejected}
       </div>
       <div class="actions" style="margin-top:12px">${buttons}</div>
       <div class="meta-line" style="margin-top:10px">Off is the kill switch. Shadow performs no Cloudflare writes. Auto challenge only applies high-confidence 6-hour managed challenges. Active can also apply high-confidence 24-hour L4 hostname-scoped blocks.</div>`;
