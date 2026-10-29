@@ -178,6 +178,16 @@ hosts = ["WWW.Example.COM"]
         self.assertIn("Number.isNaN(parsed.getTime())?'Unknown'", script)
         self.assertNotIn("try{return new Date(value).toLocaleString()}", script)
 
+    def test_enforcement_ui_surfaces_and_cleans_rollback_jobs(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        template = (root / "dashboard" / "template.py").read_text(encoding="utf-8")
+        self.assertIn("rollback_cleanup_pending", template)
+        self.assertIn("Automatic enforcement is blocked until rollback cleanup completes.", template)
+        self.assertIn('data-cleanup-job=', template)
+        self.assertIn("/api/enforcement/orphan/remove", template)
+        self.assertIn("X-Hotpot-Action':'remove-orphan", template)
+        self.assertIn("cleanupRollbackJob", template)
+
     def test_auto_response_mode_errors_preserve_plain_text_reason(self) -> None:
         root = Path(__file__).resolve().parents[1]
         script = (root / "dashboard" / "static" / "auto_response.js").read_text(

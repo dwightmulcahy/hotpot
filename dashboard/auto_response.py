@@ -427,6 +427,7 @@ class AutoResponseController:
             "status": "off",
             "reason": "automatic response is disabled",
         }
+        self.last_mode_change_rejection: dict[str, Any] | None = None
 
     async def startup(self, app: web.Application) -> None:
         self.task = asyncio.create_task(self._loop(), name="hotpot-auto-response")
@@ -527,10 +528,26 @@ class AutoResponseController:
             circuit = await self._circuit_check(force=True)
             self.last_circuit = circuit
             if circuit["status"] != "closed":
-                raise ValueError(
-                    "automatic enforcement cannot be enabled: " + str(circuit["reason"])
+                reason = "automatic enforcement cannot be enabled: " + str(circuit["reason"])
+                self.last_mode_change_rejection = {
+                    "attempted_mode": mode,
+                    "reason": reason,
+                    "checked_at": datetime.now(timezone.utc).isoformat(),
+                }
+                await self._audit(
+                    event_type="auto_response_mode_rejected",
+                    message=reason,
+                    status="rejected",
+                    details={
+                        "attempted_mode": mode,
+                        "circuit_status": circuit.get("status"),
+                        "circuit_reason": circuit.get("reason"),
+                    },
+                    principal=principal,
                 )
+                raise ValueError(reason)
         state = await asyncio.to_thread(self.state.set_mode, mode)
+        self.last_mode_change_rejection = None
         self.last_circuit = (
             {"status": "off", "reason": "dashboard kill switch is active"}
             if mode == "off"
@@ -569,6 +586,7 @@ class AutoResponseController:
             "last_run_at": self.last_run_at,
             "last_error": self.last_error,
             "circuit_breaker": self.last_circuit,
+            "last_mode_change_rejection": self.last_mode_change_rejection,
             "shadow_age_hours": round(age_hours, 1)
             if mode["mode"] == "shadow" and age_hours is not None
             else None,
