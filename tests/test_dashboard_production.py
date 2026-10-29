@@ -178,6 +178,15 @@ hosts = ["WWW.Example.COM"]
         self.assertIn("Number.isNaN(parsed.getTime())?'Unknown'", script)
         self.assertNotIn("try{return new Date(value).toLocaleString()}", script)
 
+    def test_auto_response_mode_errors_preserve_plain_text_reason(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        script = (root / "dashboard" / "static" / "auto_response.js").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("const raw=await r.text()", script)
+        self.assertIn("body?.error||body?.message||raw||('HTTP '+r.status)", script)
+        self.assertNotIn("await r.text().catch", script)
+
     def test_dashboard_image_copies_server_header_hardening(self) -> None:
         root = Path(__file__).resolve().parents[1]
         dockerfile = (root / "Dockerfile.dashboard").read_text(encoding="utf-8")

@@ -78,9 +78,10 @@
         headers:{'Content-Type':'application/json','X-Hotpot-Action':'auto-response-mode'},
         body:JSON.stringify({mode})
       });
-      let body=null;try{body=await r.json()}catch(e){}
-      if(!r.ok)throw new Error(body?.error||body?.message||await r.text().catch(()=>null)||('HTTP '+r.status));
-      render(body);
+      const raw=await r.text();
+      let body=null;try{body=raw?JSON.parse(raw):null}catch(e){}
+      if(!r.ok)throw new Error(body?.error||body?.message||raw||('HTTP '+r.status));
+      render(body||{});
     }catch(e){alert('Automatic response mode change failed: '+e.message)}
   }
   document.addEventListener('click',event=>{
