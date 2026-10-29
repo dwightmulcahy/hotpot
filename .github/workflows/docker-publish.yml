@@ -22,10 +22,15 @@ jobs:
       publish_major: ${{ steps.aliases.outputs.major }}
       publish_minor: ${{ steps.aliases.outputs.minor }}
       publish_latest: ${{ steps.aliases.outputs.latest }}
+      build_date: ${{ steps.build-metadata.outputs.build_date }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
+      - name: Resolve build metadata
+        id: build-metadata
+        shell: bash
+        run: echo "build_date=$(git show -s --format=%cI "$GITHUB_SHA")" >> "$GITHUB_OUTPUT"
       - name: Require vM.m.p semantic version tag
         shell: bash
         run: |
@@ -77,6 +82,7 @@ jobs:
       build_args: |
         HOTPOT_VERSION=${{ github.ref_name }}
         HOTPOT_GIT_SHA=${{ github.sha }}
+        HOTPOT_BUILD_DATE=${{ needs.validate-tag.outputs.build_date }}
     secrets:
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -95,6 +101,7 @@ jobs:
       build_args: |
         HOTPOT_VERSION=${{ github.ref_name }}
         HOTPOT_GIT_SHA=${{ github.sha }}
+        HOTPOT_BUILD_DATE=${{ needs.validate-tag.outputs.build_date }}
     secrets:
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
