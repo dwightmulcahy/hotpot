@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from dashboard.preflight import _bind_available as dashboard_bind_available
 from dashboard.preflight import run_preflight as run_dashboard_preflight
 from hotpot.preflight import _bind_available
 from hotpot.preflight import run_preflight as run_hotpot_preflight
@@ -69,6 +70,34 @@ class PreflightTests(unittest.TestCase):
         self.assertIn(f"errno {errno.EADDRINUSE}", detail)
         self.assertIn("Address already in use", detail)
         probe.close.assert_called_once()
+
+    def test_dashboard_bind_probe_reuses_recently_closed_addresses(self) -> None:
+        with patch("dashboard.preflight.socket.socket") as socket_factory:
+            probe = socket_factory.return_value
+            ok, detail = dashboard_bind_available("127.0.0.1", 19090)
+        self.assertTrue(ok, detail)
+        probe.setsockopt.assert_called_once_with(
+            socket.SOL_SOCKET, socket.SO_REUSEADDR, 1
+        )
+        probe.bind.assert_called_once_with(("127.0.0.1", 19090))
+        probe.close.assert_called_once()
+
+    def test_dashboard_bind_probe_reports_errno_name_and_message(self) -> None:
+        with patch("dashboard.preflight.socket.socket") as socket_factory:
+            probe = socket_factory.return_value
+            probe.bind.side_effect = OSError(errno.EADDRINUSE, "Address already in use")
+            ok, detail = dashboard_bind_available("127.0.0.1", 19090)
+        self.assertFalse(ok)
+        self.assertIn("EADDRINUSE", detail)
+        self.assertIn(f"errno {errno.EADDRINUSE}", detail)
+        self.assertIn("Address already in use", detail)
+        probe.close.assert_called_once()
+
+    def test_dashboard_normal_startup_skips_probe_bind(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        source = (root / "dashboard" / "main.py").read_text(encoding="utf-8")
+        self.assertIn("report = run_preflight(check_bind=check_config)", source)
+        self.assertIn('check_config = "--check-config" in sys.argv[1:]', source)
 
     def test_dashboard_preflight_accepts_coherent_local_configuration(self) -> None:
         with tempfile.TemporaryDirectory() as directory, patch.dict(

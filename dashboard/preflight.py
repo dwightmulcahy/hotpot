@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import os
 import socket
 import tempfile
@@ -32,9 +33,22 @@ def _bind_available(bind: str, port: int) -> tuple[bool, str]:
     family = socket.AF_INET6 if ":" in bind else socket.AF_INET
     sock = socket.socket(family, socket.SOCK_STREAM)
     try:
+        # Match the production aiohttp listener more closely and avoid false
+        # failures when a recently replaced container leaves sockets in TIME_WAIT.
+        # This does not allow two active listeners to share the port.
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind((bind, port))
     except OSError as exc:
-        return False, f"{bind}:{port} cannot be bound: {type(exc).__name__}"
+        error_name = errno.errorcode.get(exc.errno, type(exc).__name__)
+        error_text = exc.strerror or str(exc) or type(exc).__name__
+        if exc.errno is None:
+            detail = f"{bind}:{port} cannot be bound: {error_name}: {error_text}"
+        else:
+            detail = (
+                f"{bind}:{port} cannot be bound: {error_name} "
+                f"(errno {exc.errno}): {error_text}"
+            )
+        return False, detail
     finally:
         sock.close()
     return True, f"{bind}:{port} is available"
