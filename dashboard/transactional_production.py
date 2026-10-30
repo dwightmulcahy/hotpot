@@ -191,7 +191,8 @@ class TransactionalProductionDashboard(ProductionDashboard):
                 text="only approved/applied/failed enforcement can be repaired"
             )
         try:
-            rules = await self._cloudflare_enforcer().repair(recommendation)
+            async with self._cloudflare_mutation_lock:
+                rules = await self._cloudflare_enforcer().repair(recommendation)
         except CloudflareTransactionError as exc:
             queued = await self.cloudflare_cleanup.enqueue(
                 recommendation_id, exc.residual_rules
@@ -251,17 +252,34 @@ class TransactionalProductionDashboard(ProductionDashboard):
         if not isinstance(payload, dict):
             raise web.HTTPBadRequest(text="JSON body must be an object")
         rule = {
+            "provider": str(payload.get("provider") or "").strip(),
             "zone_id": str(payload.get("zone_id") or "").strip(),
+            "account_id": str(payload.get("account_id") or "").strip(),
+            "scope": str(payload.get("scope") or "").strip(),
             "ruleset_id": str(payload.get("ruleset_id") or "").strip(),
             "rule_id": str(payload.get("rule_id") or "").strip(),
             "ref": str(payload.get("ref") or "").strip(),
+            "target_value": str(payload.get("target_value") or "").strip(),
+            "expires_at": str(payload.get("expires_at") or "").strip(),
         }
-        if not rule["zone_id"] or not rule["ruleset_id"] or not rule["rule_id"]:
+        provider = rule["provider"] or "custom_waf"
+        if provider == "custom_waf_pool":
+            if not rule["zone_id"] or not rule["ref"]:
+                raise web.HTTPBadRequest(
+                    text="zone_id and ref are required for pooled WAF cleanup"
+                )
+        elif provider == "ip_access":
+            if not rule["rule_id"] or not (rule["account_id"] or rule["zone_id"]):
+                raise web.HTTPBadRequest(
+                    text="rule_id and account_id/zone_id are required for IP Access cleanup"
+                )
+        elif not rule["zone_id"] or not rule["ruleset_id"] or not rule["rule_id"]:
             raise web.HTTPBadRequest(
                 text="zone_id, ruleset_id, and rule_id are required"
             )
         try:
-            await self._cloudflare_enforcer().remove_rule(rule)
+            async with self._cloudflare_mutation_lock:
+                await self._cloudflare_enforcer().remove_rule(rule)
         except Exception as exc:
             return web.json_response(
                 {"removed": False, "error": f"{type(exc).__name__}: {exc}"},
