@@ -235,8 +235,9 @@ def build_app() -> web.Application:
 
 
 def main() -> None:
-    report = run_preflight()
-    if "--check-config" in sys.argv[1:]:
+    check_config = "--check-config" in sys.argv[1:]
+    report = run_preflight(check_bind=check_config)
+    if check_config:
         print(json.dumps(report, indent=2, sort_keys=True))
         raise SystemExit(0 if report["ok"] else 2)
     if not report["ok"]:
