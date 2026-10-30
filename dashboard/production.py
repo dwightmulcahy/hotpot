@@ -82,7 +82,9 @@ class ProductionDashboard(core.Dashboard):
                 "HOTPOT_CLOUDFLARE_API_BASE", CLOUDFLARE_API_BASE
             ).strip()
             or CLOUDFLARE_API_BASE,
+            account_id=os.getenv("HOTPOT_CLOUDFLARE_ACCOUNT_ID", "").strip(),
         )
+        self._cloudflare_mutation_lock = asyncio.Lock()
         self._last_housekeeping = 0.0
         self._last_cloudflare_reconcile = 0.0
         self.maintenance_errors = 0
@@ -282,15 +284,16 @@ class ProductionDashboard(core.Dashboard):
 
     async def _apply_one(self, recommendation: dict[str, Any]) -> dict[str, Any]:
         recommendation_id = str(recommendation.get("recommendation_id") or "")
-        try:
-            rules = await self._cloudflare_enforcer().apply(recommendation)
-        except Exception as exc:
-            failed = await self.store.mark_apply_failed(
-                recommendation_id, f"{type(exc).__name__}: {exc}"
-            )
-            return failed or recommendation
-        applied = await self.store.mark_applied(recommendation_id, rules)
-        return applied or recommendation
+        async with self._cloudflare_mutation_lock:
+            try:
+                rules = await self._cloudflare_enforcer().apply(recommendation)
+            except Exception as exc:
+                failed = await self.store.mark_apply_failed(
+                    recommendation_id, f"{type(exc).__name__}: {exc}"
+                )
+                return failed or recommendation
+            applied = await self.store.mark_applied(recommendation_id, rules)
+            return applied or recommendation
 
     async def _maybe_reconcile_cloudflare(
         self, *, force: bool = False
@@ -317,9 +320,10 @@ class ProductionDashboard(core.Dashboard):
             self.response_policy, status="applied", limit=500
         )
         try:
-            report = await self._cloudflare_enforcer().reconcile(
-                list(applied.get("recommendations") or [])
-            )
+            async with self._cloudflare_mutation_lock:
+                report = await self._cloudflare_enforcer().reconcile(
+                    list(applied.get("recommendations") or [])
+                )
         except Exception as exc:
             report = {
                 "checked_at": datetime.now(timezone.utc).isoformat(),
@@ -348,9 +352,10 @@ class ProductionDashboard(core.Dashboard):
 
         if self.cloudflare.can_remove:
             for recommendation in await self.store.due_removals(100):
-                errors = await self._cloudflare_enforcer().remove(
-                    list(recommendation.get("enforcement_rules") or [])
-                )
+                async with self._cloudflare_mutation_lock:
+                    errors = await self._cloudflare_enforcer().remove(
+                        list(recommendation.get("enforcement_rules") or [])
+                    )
                 await self.store.mark_removal_result(
                     str(recommendation.get("recommendation_id") or ""),
                     errors,
@@ -626,9 +631,10 @@ class ProductionDashboard(core.Dashboard):
             raise web.HTTPNotFound(text="recommendation not found")
         if result.get("status") != "applied":
             raise web.HTTPConflict(text="only applied enforcement can be removed")
-        errors = await self._cloudflare_enforcer().remove(
-            list(result.get("enforcement_rules") or [])
-        )
+        async with self._cloudflare_mutation_lock:
+            errors = await self._cloudflare_enforcer().remove(
+                list(result.get("enforcement_rules") or [])
+            )
         result = await self.store.mark_removal_result(
             recommendation_id, errors, reason="manual_remove"
         )
@@ -821,26 +827,35 @@ class ProductionDashboard(core.Dashboard):
                         duration_ms=int((time.monotonic() - tick) * 1000),
                     )
 
+            account_id = str(self.cloudflare.account_id or "").strip()
+            if account_id:
                 tick = time.monotonic()
                 try:
-                    await self._cloudflare_enforcer().inspect_ip_access_capability(
-                        zone_id
+                    await self._cloudflare_enforcer().inspect_account_ip_access_capability(
+                        account_id
                     )
                     add_check(
-                        f"cloudflare-ip-access:{zone_id}",
-                        f"Cloudflare long-block access {zone_id[:8]}…",
+                        "cloudflare-account-ip-access",
+                        "Cloudflare account long-block access",
                         "pass",
-                        "Zone Firewall Services permission is available for long blocks",
+                        "Account Firewall Access Rules permission is available",
                         duration_ms=int((time.monotonic() - tick) * 1000),
                     )
                 except Exception as exc:
                     add_check(
-                        f"cloudflare-ip-access:{zone_id}",
-                        f"Cloudflare long-block access {zone_id[:8]}…",
+                        "cloudflare-account-ip-access",
+                        "Cloudflare account long-block access",
                         "fail",
                         f"{type(exc).__name__}: {exc}",
                         duration_ms=int((time.monotonic() - tick) * 1000),
                     )
+            else:
+                add_check(
+                    "cloudflare-account-ip-access",
+                    "Cloudflare account long-block access",
+                    "warning",
+                    "HOTPOT_CLOUDFLARE_ACCOUNT_ID is not configured; 7-day IP blocks are unavailable",
+                )
 
         async with self.cache_lock:
             database = dict(self.cache.get("database") or {})

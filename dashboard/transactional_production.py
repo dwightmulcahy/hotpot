@@ -117,6 +117,12 @@ class TransactionalProductionDashboard(ProductionDashboard):
 
     async def _apply_one(self, recommendation: dict[str, Any]) -> dict[str, Any]:
         recommendation_id = str(recommendation.get("recommendation_id") or "")
+        async with self._cloudflare_mutation_lock:
+            return await self._apply_one_locked(recommendation, recommendation_id)
+
+    async def _apply_one_locked(
+        self, recommendation: dict[str, Any], recommendation_id: str
+    ) -> dict[str, Any]:
         try:
             rules = await self._cloudflare_enforcer().apply(recommendation)
         except CloudflareTransactionError as exc:
