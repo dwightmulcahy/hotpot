@@ -197,6 +197,16 @@ hosts = ["WWW.Example.COM"]
         self.assertIn("body?.error||body?.message||raw||('HTTP '+r.status)", script)
         self.assertNotIn("await r.text().catch", script)
 
+    def test_system_check_validates_cloudflare_long_block_permission(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        production = (root / "dashboard" / "production.py").read_text(encoding="utf-8")
+        template = (root / "dashboard" / "template.py").read_text(encoding="utf-8")
+        self.assertIn("inspect_ip_access_capability", production)
+        self.assertIn("cloudflare-ip-access:", production)
+        self.assertIn("Account Firewall Access Rules permission is available", production)
+        self.assertIn("Long blocks", template)
+        self.assertIn("long_block_provider", template)
+
     def test_dashboard_image_copies_server_header_hardening(self) -> None:
         root = Path(__file__).resolve().parents[1]
         dockerfile = (root / "Dockerfile.dashboard").read_text(encoding="utf-8")
