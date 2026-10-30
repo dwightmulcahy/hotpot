@@ -10,7 +10,6 @@ from dashboard.cloudflare_enforcement import (
     CloudflareTarget,
 )
 from dashboard.enforcement_plan import build_enforcement_plan
-from dashboard.cloudflare_enforcement_legacy import CloudflareEnforcementError
 
 
 class FakeAccessEnforcer(CloudflareEnforcer):

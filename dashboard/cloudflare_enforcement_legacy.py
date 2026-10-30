@@ -326,8 +326,6 @@ class CloudflareEnforcer:
         recommendation_id = str(
             recommendation.get("recommendation_id") or ""
         )
-        target_type = str(recommendation.get("target_type") or "")
-        target_value = str(recommendation.get("target_value") or "")
         cf_action = self._rule_action(str(recommendation.get("action") or ""))
         expires_at = str(
             recommendation.get("enforcement_expires_at")
