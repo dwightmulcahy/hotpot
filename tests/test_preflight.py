@@ -232,6 +232,38 @@ policy_token_file = "{root / 'missing-policy'}"
         )
         self.assertEqual(credentials["status"], "fail")
 
+    def test_dashboard_preflight_warns_when_cloudflare_account_id_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            "os.environ",
+            {
+                "HOTPOT_ADMIN_TOKEN": "collector-token",
+                "HOTPOT_DASHBOARD_TOKEN": "viewer-token",
+                "HOTPOT_DASHBOARD_DATA_DIR": directory,
+                "HOTPOT_DASHBOARD_INSTANCES": json.dumps(
+                    [{"id": "one", "name": "One", "url": "http://127.0.0.1:18088"}]
+                ),
+                "HOTPOT_CLOUDFLARE_ENFORCEMENT_ENABLED": "true",
+                "HOTPOT_CLOUDFLARE_API_TOKEN": "cf-token",
+                "HOTPOT_CLOUDFLARE_ACCOUNT_ID": "",
+                "HOTPOT_CLOUDFLARE_TARGETS": json.dumps(
+                    {
+                        "one": {
+                            "zone_id": "zone-one",
+                            "hosts": ["one.example.com"],
+                        }
+                    }
+                ),
+                "HOTPOT_DASHBOARD_NOTIFICATIONS_ENABLED": "false",
+            },
+            clear=False,
+        ):
+            report = run_dashboard_preflight(check_bind=False)
+        account = next(
+            row for row in report["checks"] if row["id"] == "cloudflare-account"
+        )
+        self.assertEqual(account["status"], "warning")
+        self.assertTrue(report["ok"])
+
     def test_dashboard_preflight_fails_when_enforcement_has_no_targets(self) -> None:
         with tempfile.TemporaryDirectory() as directory, patch.dict(
             "os.environ",
