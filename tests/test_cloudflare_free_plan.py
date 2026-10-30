@@ -109,32 +109,14 @@ class CloudflareFreePlanEnforcementTests(unittest.IsolatedAsyncioTestCase):
             "evidence": {"instance_ids": ["one"]},
         }
 
-    async def test_ip_access_capability_probe_uses_zone_access_rules_endpoint(self) -> None:
-        enforcer = FakeAccessEnforcer(self.config())
-        result = await enforcer.inspect_ip_access_capability("zone123456")
-        self.assertTrue(result["accessible"])
-        self.assertEqual(
-            result["permission"], "Firewall Services Write"
-        )
-
-    async def test_ip_access_403_explains_required_cloudflare_permission(self) -> None:
-        class ForbiddenEnforcer(CloudflareEnforcer):
-            async def _request(self, method, path, *, payload=None, allow_404=False):
-                raise CloudflareEnforcementError(
-                    "Cloudflare API returned HTTP 403: Authentication error"
-                )
-
-        enforcer = ForbiddenEnforcer(self.config(), client=object())
-        with self.assertRaisesRegex(
-            CloudflareEnforcementError,
-            "Zone Firewall Services Edit",
-        ):
-            await enforcer.inspect_ip_access_capability("zone123456")
-
     async def test_long_block_uses_ip_access_without_custom_waf_slot(self) -> None:
         expires = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
         enforcer = FakeAccessEnforcer(self.config())
-        rules = await enforcer.apply(self.recommendation("rec-one", expires))
+        recommendation = self.recommendation("rec-one", expires)
+        rules = await enforcer._apply_ip_access(
+            recommendation,
+            {"zone123456": ("www.example.com",)},
+        )
 
         self.assertEqual(enforcer.created, 1)
         self.assertEqual(enforcer.custom_waf_calls, 0)
@@ -149,8 +131,11 @@ class CloudflareFreePlanEnforcementTests(unittest.IsolatedAsyncioTestCase):
         second_expiry = (now + timedelta(days=7)).isoformat()
         enforcer = FakeAccessEnforcer(self.config())
 
-        first = await enforcer.apply(self.recommendation("rec-first", first_expiry))
-        second = await enforcer.apply(self.recommendation("rec-second", second_expiry))
+        first_rec = self.recommendation("rec-first", first_expiry)
+        second_rec = self.recommendation("rec-second", second_expiry)
+        zone_hosts = {"zone123456": ("www.example.com",)}
+        first = await enforcer._apply_ip_access(first_rec, zone_hosts)
+        second = await enforcer._apply_ip_access(second_rec, zone_hosts)
 
         self.assertEqual(enforcer.created, 1)
         self.assertEqual(enforcer.patched, 1)
@@ -170,8 +155,12 @@ class CloudflareFreePlanEnforcementTests(unittest.IsolatedAsyncioTestCase):
     async def test_ipv6_long_block_uses_ip6_configuration(self) -> None:
         expires = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
         enforcer = FakeAccessEnforcer(self.config())
-        rules = await enforcer.apply(
-            self.recommendation("rec-v6", expires, "2001:db8::1234")
+        recommendation = self.recommendation(
+            "rec-v6", expires, "2001:db8::1234"
+        )
+        rules = await enforcer._apply_ip_access(
+            recommendation,
+            {"zone123456": ("www.example.com",)},
         )
         current = enforcer.access_rules["zone123456"][rules[0]["rule_id"]]
         self.assertEqual(current["configuration"]["target"], "ip6")
@@ -181,7 +170,10 @@ class CloudflareFreePlanEnforcementTests(unittest.IsolatedAsyncioTestCase):
         expires = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
         enforcer = FakeAccessEnforcer(self.config())
         recommendation = self.recommendation("rec-reconcile", expires)
-        rules = await enforcer.apply(recommendation)
+        rules = await enforcer._apply_ip_access(
+            recommendation,
+            {"zone123456": ("www.example.com",)},
+        )
         report = await enforcer.reconcile(
             [{**recommendation, "enforcement_rules": rules}]
         )
@@ -192,22 +184,25 @@ class CloudflareFreePlanEnforcementTests(unittest.IsolatedAsyncioTestCase):
             IP_ACCESS_PROVIDER,
         )
 
-    def test_plan_shows_zone_wide_ip_access_scope(self) -> None:
+    def test_plan_shows_zone_wide_custom_waf_scope(self) -> None:
         expires = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
         plan = build_enforcement_plan(
             self.recommendation("rec-plan", expires), self.config()
         )
-        self.assertEqual(plan["provider"], IP_ACCESS_PROVIDER)
-        self.assertEqual(plan["zones"][0]["provider"], IP_ACCESS_PROVIDER)
+        self.assertEqual(plan["provider"], "custom_waf")
+        self.assertEqual(plan["zones"][0]["provider"], "custom_waf")
         self.assertEqual(plan["zones"][0]["scope"], "zone")
-        self.assertIsNone(plan["zones"][0]["expression"])
+        self.assertEqual(
+            plan["zones"][0]["expression"],
+            "ip.src eq 34.14.99.143",
+        )
 
     def test_status_explains_long_block_provider(self) -> None:
         status = self.config().public_status()
         self.assertEqual(
-            status["long_block_provider"], "Cloudflare zone IP Access Rules"
+            status["long_block_provider"], "Cloudflare zone WAF custom rule"
         )
-        self.assertFalse(status["long_blocks_consume_custom_rule_slots"])
+        self.assertTrue(status["long_blocks_consume_custom_rule_slots"])
 
 
 if __name__ == "__main__":

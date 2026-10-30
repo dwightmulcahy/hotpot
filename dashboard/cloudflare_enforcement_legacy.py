@@ -250,6 +250,15 @@ class CloudflareEnforcer:
             return "block"
         raise CloudflareEnforcementError("recommendation is not enforceable")
 
+    def _expression_for_recommendation(
+        self, recommendation: dict[str, Any], hosts: tuple[str, ...]
+    ) -> str:
+        return build_expression(
+            str(recommendation.get("target_type") or ""),
+            str(recommendation.get("target_value") or ""),
+            hosts,
+        )
+
     def _targets_for_recommendation(
         self, recommendation: dict[str, Any]
     ) -> dict[str, tuple[str, ...]]:
@@ -332,7 +341,9 @@ class CloudflareEnforcer:
         try:
             for zone_id, hosts in zone_hosts.items():
                 ruleset_id, existing_rules = await self._entrypoint_ruleset(zone_id)
-                expression = build_expression(target_type, target_value, hosts)
+                expression = self._expression_for_recommendation(
+                    recommendation, hosts
+                )
                 ref = f"hotpot_{recommendation_id[:20]}_{zone_id[:8]}"
                 existing = next(
                     (

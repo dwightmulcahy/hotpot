@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 from typing import Any
 
 from .cloudflare_enforcement import CloudflareConfig, build_expression
@@ -41,29 +42,20 @@ def build_enforcement_plan(
         target = config.targets[instance_id]
         by_zone.setdefault(target.zone_id, set()).update(target.hosts)
 
-    use_ip_access = action == "recommend_long_block" and target_type == "ip"
+    zone_wide_long_block = (
+        action == "recommend_long_block" and target_type == "ip"
+    )
     zones: list[dict[str, Any]] = []
     for zone_id, host_values in sorted(by_zone.items()):
         hosts = tuple(sorted(host_values))
-        if use_ip_access:
-            zones.append(
-                {
-                    "zone_id": zone_id,
-                    "hosts": list(hosts),
-                    "action": "block",
-                    "provider": "ip_access",
-                    "scope": "zone",
-                    "expression": None,
-                    "ref": None,
-                    "expected_effect": (
-                        "Cloudflare zone-wide IP Access block; does not consume a "
-                        "custom WAF rule slot"
-                    ),
-                }
-            )
-            continue
-
-        expression = build_expression(target_type, target_value, hosts)
+        if zone_wide_long_block:
+            try:
+                address = ipaddress.ip_address(target_value)
+            except ValueError as exc:
+                raise ValueError("invalid IP enforcement target") from exc
+            expression = f"ip.src eq {address.compressed}"
+        else:
+            expression = build_expression(target_type, target_value, hosts)
         ref = f"hotpot_{recommendation_id[:20]}_{zone_id[:8]}"
         zones.append(
             {
@@ -71,13 +63,19 @@ def build_enforcement_plan(
                 "hosts": list(hosts),
                 "action": cf_action,
                 "provider": "custom_waf",
-                "scope": "configured-hostnames",
+                "scope": (
+                    "zone" if zone_wide_long_block else "configured-hostnames"
+                ),
                 "expression": expression,
                 "ref": ref,
                 "expected_effect": (
-                    "Cloudflare managed challenge for matching requests"
-                    if cf_action == "managed_challenge"
-                    else "Cloudflare block for matching requests"
+                    "Cloudflare zone-wide IP block via WAF custom rule"
+                    if zone_wide_long_block
+                    else (
+                        "Cloudflare managed challenge for matching requests"
+                        if cf_action == "managed_challenge"
+                        else "Cloudflare block for matching requests"
+                    )
                 ),
             }
         )
@@ -87,7 +85,7 @@ def build_enforcement_plan(
         "actor_key": recommendation.get("actor_key"),
         "recommendation_action": action,
         "cloudflare_action": cf_action,
-        "provider": "ip_access" if use_ip_access else "custom_waf",
+        "provider": "custom_waf",
         "target_type": target_type,
         "target_value": target_value,
         "duration_hours": recommendation.get("duration_hours"),

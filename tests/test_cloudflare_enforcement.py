@@ -119,6 +119,19 @@ class CloudflareEnforcerTests(unittest.IsolatedAsyncioTestCase):
             "evidence": {"instance_ids": ["one"]},
         }
 
+    async def test_long_block_uses_zone_wide_waf_expression(self) -> None:
+        enforcer = FakeCloudflareEnforcer(self.config())
+        recommendation = {
+            **self.recommendation(),
+            "action": "recommend_long_block",
+        }
+        rules = await enforcer.apply(recommendation)
+        self.assertEqual(enforcer.created, 1)
+        self.assertEqual(rules[0]["provider"], "custom_waf")
+        self.assertTrue(rules[0]["zone_wide"])
+        self.assertEqual(rules[0]["expression"], "ip.src eq 8.8.8.8")
+        self.assertNotIn("http.host", rules[0]["expression"])
+
     async def test_apply_creates_rule_and_returns_deletion_metadata(self) -> None:
         enforcer = FakeCloudflareEnforcer(self.config())
         rules = await enforcer.apply(self.recommendation())

@@ -821,27 +821,6 @@ class ProductionDashboard(core.Dashboard):
                         duration_ms=int((time.monotonic() - tick) * 1000),
                     )
 
-                tick = time.monotonic()
-                try:
-                    await self._cloudflare_enforcer().inspect_ip_access_capability(
-                        zone_id
-                    )
-                    add_check(
-                        f"cloudflare-ip-access:{zone_id}",
-                        f"Cloudflare long-block access {zone_id[:8]}…",
-                        "pass",
-                        "Zone Firewall Services permission is available for long blocks",
-                        duration_ms=int((time.monotonic() - tick) * 1000),
-                    )
-                except Exception as exc:
-                    add_check(
-                        f"cloudflare-ip-access:{zone_id}",
-                        f"Cloudflare long-block access {zone_id[:8]}…",
-                        "fail",
-                        f"{type(exc).__name__}: {exc}",
-                        duration_ms=int((time.monotonic() - tick) * 1000),
-                    )
-
         async with self.cache_lock:
             database = dict(self.cache.get("database") or {})
         housekeeping = database.get("last_housekeeping") or {}

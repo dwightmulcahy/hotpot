@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -43,18 +44,29 @@ __all__ = [
 class CloudflareConfig(_LegacyConfig):
     def public_status(self) -> dict[str, Any]:
         result = super().public_status()
-        result["long_block_provider"] = "Cloudflare zone IP Access Rules"
-        result["long_blocks_consume_custom_rule_slots"] = False
+        result["long_block_provider"] = "Cloudflare zone WAF custom rule"
+        result["long_blocks_consume_custom_rule_slots"] = True
         return result
 
 
 class CloudflareEnforcer(IPAccessMixin, _LegacyEnforcer):
-    @staticmethod
-    def _uses_ip_access_rule(recommendation: dict[str, Any]) -> bool:
-        return (
+    def _expression_for_recommendation(
+        self, recommendation: dict[str, Any], hosts: tuple[str, ...]
+    ) -> str:
+        if (
             str(recommendation.get("action") or "") == "recommend_long_block"
             and str(recommendation.get("target_type") or "") == "ip"
-        )
+        ):
+            try:
+                address = ipaddress.ip_address(
+                    str(recommendation.get("target_value") or "")
+                )
+            except ValueError as exc:
+                raise CloudflareEnforcementError(
+                    "invalid IP enforcement target"
+                ) from exc
+            return f"ip.src eq {address.compressed}"
+        return super()._expression_for_recommendation(recommendation, hosts)
 
     @staticmethod
     def _stored_rule(
@@ -82,22 +94,22 @@ class CloudflareEnforcer(IPAccessMixin, _LegacyEnforcer):
             "ref": ref,
             "target_value": target_value,
             "expires_at": expires_at,
-            "zone_wide": provider == IP_ACCESS_PROVIDER,
+            "zone_wide": (
+                provider == IP_ACCESS_PROVIDER
+                or (
+                    provider == CUSTOM_WAF_PROVIDER
+                    and str(expression).startswith("ip.src eq ")
+                    and "http.host" not in str(expression)
+                )
+            ),
             "created_at": datetime.now(timezone.utc).isoformat(),
             "reused": reused,
         }
 
-    async def _apply_custom_waf(self, recommendation, zone_hosts):
-        return await super().apply(recommendation)
-
     async def apply(self, recommendation):
-        if not self.config.configured:
-            raise CloudflareEnforcementError(
-                "Cloudflare enforcement is not fully configured"
-            )
-        zone_hosts = self._targets_for_recommendation(recommendation)
-        if self._uses_ip_access_rule(recommendation):
-            return await self._apply_ip_access(recommendation, zone_hosts)
+        # New long blocks deliberately use the same zone Rulesets/WAF path as
+        # challenges and 24-hour blocks. Legacy IP Access rules remain supported
+        # below for reconciliation and removal of already-persisted enforcement.
         return await super().apply(recommendation)
 
     async def remove_rule(self, rule):
