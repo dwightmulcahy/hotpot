@@ -1,47 +1,77 @@
 # Cloudflare Free-plan enforcement
 
-Hotpot uses two Cloudflare enforcement mechanisms so temporary response actions do not exhaust the Free plan's small custom-WAF rule quota.
+Hotpot is designed to stay useful on Cloudflare's Free plan without consuming one custom WAF rule for every attacker.
 
 ## Enforcement mapping
 
-| Hotpot recommendation | Cloudflare mechanism | Scope |
-| --- | --- | --- |
-| `recommend_challenge` | Custom WAF rule | Configured hostnames only |
-| `recommend_block` | Custom WAF rule | Configured hostnames only |
-| `recommend_long_block` targeting an IP | IP Access Rule | Entire Cloudflare zone |
-| `recommend_long_block` targeting a Worker zone | Custom WAF rule | Configured hostnames only |
+| Hotpot recommendation | Cloudflare mechanism | Scope | WAF slots |
+| --- | --- | --- | --- |
+| `recommend_challenge` targeting an IP | Shared Managed Challenge WAF pool | Configured protected hostnames in each affected zone | At most 1 per zone |
+| `recommend_block` targeting an IP | Shared Block WAF pool | Configured protected hostnames in each affected zone | At most 1 per zone |
+| `recommend_long_block` targeting an IP | IP Access Rule | Entire configured Cloudflare account | 0 |
+| Worker-zone recommendations | Individual Custom WAF rule | Configured protected hostnames | 1 per active rule |
 
-Long IP blocks therefore no longer consume a custom-WAF rule slot.
+For ordinary IP attackers, Hotpot therefore uses at most **two custom WAF rules per zone**, regardless of how many IPs are simultaneously challenged or blocked.
 
-## Important scope difference
+## Shared WAF pools
 
-Cloudflare IP Access Rules are zone-wide. A long-blocked IP is blocked from every proxied hostname in that zone, not only the hostname where Hotpot observed the attack. Hotpot only chooses this mechanism for the highest-duration IP recommendation and still requires explicit dashboard approval.
+Each zone can have two Hotpot-owned shared rules:
 
-If zone-wide blocking is too broad for a particular deployment, dismiss the long-block recommendation or use a shorter hostname-scoped response instead.
+- `hotpot_pool_challenge` with action `managed_challenge`;
+- `hotpot_pool_block` with action `block`.
 
-## Duplicate IPs and expiry
+The rule expression contains a set of active IP addresses and the union of configured protected hostnames for that zone. Adding another attacker updates the IP set instead of creating another Cloudflare custom rule.
 
-Hotpot searches for an existing Hotpot-owned IP Access Rule before creating a new one. If the same IP receives another long-block recommendation in the same zone:
+Hotpot keeps each attacker's expiry in SQLite. When one recommendation expires, Hotpot removes only that IP from the shared expression. The Cloudflare rule is deleted only when its final member expires.
 
-- the existing rule is reused;
-- the expiry is extended only when the new recommendation expires later;
-- expiration of the older recommendation does not remove a rule that a newer recommendation extended;
-- the last active recommendation removes the shared rule at expiry.
+Because Block and Managed Challenge are terminating actions, Hotpot keeps the Block pool before the Challenge pool in Cloudflare rule order.
 
-This prevents repeated activity from one IP from consuming multiple Cloudflare rules.
+Hotpot serializes Cloudflare mutations inside the dashboard so concurrent approvals cannot overwrite each other's shared-pool membership updates.
 
-## Existing deployments
+## Expression capacity
 
-Rules applied by older Hotpot releases remain backward compatible. Existing long blocks that were created as custom-WAF rules stay in place and expire/remove normally. New long IP blocks use IP Access Rules after the dashboard is upgraded.
+Cloudflare custom-rule expressions have a finite length. Hotpot uses a conservative 3,900-character ceiling for a pooled expression and fails closed rather than silently truncating an IP set. This still permits far more simultaneous IP memberships than one-rule-per-attacker enforcement on the Free plan.
 
-Repair also preserves the provider recorded with an existing rule instead of silently switching providers behind persisted dashboard state.
+## 7-day long blocks
+
+A manually approved 7-day IP long block uses the account-scoped Cloudflare IP Access Rules endpoint:
+
+`/accounts/{account_id}/firewall/access_rules/rules`
+
+This avoids consuming a custom WAF rule slot. It also means the block applies across **every Cloudflare zone in that account**, not just the site where Hotpot observed the attacker.
+
+Hotpot makes that scope explicit in the approval dialog and never automates long blocks.
+
+Set:
+
+```text
+HOTPOT_CLOUDFLARE_ACCOUNT_ID=<your Cloudflare account id>
+```
+
+The dashboard disables IP Long block approval when the account ID is not configured.
 
 ## API token permissions
 
-The Cloudflare API token used by the dashboard must retain the permissions needed for Custom WAF rule management and also be allowed to manage Firewall/IP Access Rules for the configured zones/account. Cloudflare currently documents Firewall Access Rules read/write permissions for the IP Access Rules API.
+The dashboard token needs:
 
-Use the narrowest token that works for the zones Hotpot manages. Keep the token in a Docker secret or `HOTPOT_CLOUDFLARE_API_TOKEN_FILE` rather than embedding it in Compose.
+- **Zone WAF Write/Edit** for the shared challenge/block WAF pools;
+- **Account Firewall Access Rules Write/Edit** for account-wide 7-day IP blocks.
+
+Keep the token in a Docker secret or `HOTPOT_CLOUDFLARE_API_TOKEN_FILE` rather than embedding it in Compose.
+
+## Backward compatibility
+
+Hotpot keeps provider metadata with every applied recommendation.
+
+Existing pre-pool custom-WAF rules continue to reconcile, repair, expire, and remove normally. Existing legacy zone-scoped IP Access Rules also retain their original zone scope for repair/removal. New IP challenges/24-hour blocks use shared WAF pools, and new IP long blocks use account-scoped IP Access Rules.
 
 ## Safety behavior
 
-Nothing about this change enables automatic blocking. Hotpot continues to require explicit approval before applying a recommendation, continues to honor allowlists/trusted-proxy checks, reconciles persisted Cloudflare state, and automatically removes temporary enforcement when it expires.
+Pooling does not weaken response guardrails:
+
+- automatic actions still honor allowlists, trusted-proxy exclusions, verified-bot checks, rate limits, and circuit breakers;
+- long blocks remain manual-only;
+- every mutation is verified against Cloudflare;
+- reconciliation detects missing/drifted pool memberships and untracked pool members;
+- rollback cleanup removes only the affected pooled membership rather than deleting unrelated attackers;
+- temporary enforcement still expires automatically.
