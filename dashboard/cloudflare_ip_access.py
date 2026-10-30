@@ -4,9 +4,15 @@ import ipaddress
 from datetime import datetime, timezone
 from urllib.parse import urlencode
 
+from .cloudflare_enforcement_legacy import CloudflareEnforcementError
+
 IP_ACCESS_PROVIDER = "ip_access"
 CUSTOM_WAF_PROVIDER = "custom_waf"
 HOT_POT_ACCESS_NOTES_PREFIX = "hotpot-long-block"
+IP_ACCESS_PERMISSION_HINT = (
+    "long blocks require Cloudflare Account Firewall Access Rules Edit "
+    "(API permission: Account Firewall Access Rules Write) scoped to the account"
+)
 
 
 def parse_iso(value: str | None) -> datetime | None:
@@ -44,8 +50,38 @@ def access_target(value: str) -> tuple[str, str]:
 
 
 class IPAccessMixin:
+    async def _ip_access_request(
+        self,
+        method: str,
+        path: str,
+        *,
+        payload=None,
+        allow_404: bool = False,
+    ):
+        try:
+            return await self._request(
+                method, path, payload=payload, allow_404=allow_404
+            )
+        except CloudflareEnforcementError as exc:
+            if "HTTP 403" in str(exc):
+                raise CloudflareEnforcementError(
+                    f"{exc}; {IP_ACCESS_PERMISSION_HINT}"
+                ) from exc
+            raise
+
+    async def inspect_ip_access_capability(self, zone_id: str) -> dict[str, object]:
+        await self._ip_access_request(
+            "GET",
+            f"/zones/{zone_id}/firewall/access_rules/rules?per_page=1",
+        )
+        return {
+            "zone_id": zone_id,
+            "accessible": True,
+            "permission": "Account Firewall Access Rules Write",
+        }
+
     async def inspect_access_rule(self, zone_id: str, rule_id: str):
-        status, data = await self._request(
+        status, data = await self._ip_access_request(
             "GET", f"/zones/{zone_id}/firewall/access_rules/rules/{rule_id}", allow_404=True
         )
         if status == 404:
@@ -62,7 +98,7 @@ class IPAccessMixin:
             "match": "all",
             "per_page": "50",
         })
-        _, data = await self._request(
+        _, data = await self._ip_access_request(
             "GET", f"/zones/{zone_id}/firewall/access_rules/rules?{query}"
         )
         for item in (data or {}).get("result") or []:
@@ -99,7 +135,7 @@ class IPAccessMixin:
                     effective = current.isoformat() if current else expires_at
                     if requested and (current is None or requested > current):
                         effective = requested.isoformat()
-                        await self._request(
+                        await self._ip_access_request(
                             "PATCH",
                             f"/zones/{zone_id}/firewall/access_rules/rules/{rule_id}",
                             payload={
@@ -109,7 +145,7 @@ class IPAccessMixin:
                             },
                         )
                 else:
-                    _, response = await self._request(
+                    _, response = await self._ip_access_request(
                         "POST",
                         f"/zones/{zone_id}/firewall/access_rules/rules",
                         payload={
@@ -163,6 +199,6 @@ class IPAccessMixin:
         stored_expiry = parse_iso(rule.get("expires_at"))
         if remote_expiry and stored_expiry and remote_expiry > stored_expiry:
             return
-        await self._request(
+        await self._ip_access_request(
             "DELETE", f"/zones/{zone_id}/firewall/access_rules/rules/{rule_id}", allow_404=True
         )

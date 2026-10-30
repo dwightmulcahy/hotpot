@@ -10,6 +10,7 @@ from dashboard.cloudflare_enforcement import (
     CloudflareTarget,
 )
 from dashboard.enforcement_plan import build_enforcement_plan
+from dashboard.cloudflare_enforcement_legacy import CloudflareEnforcementError
 
 
 class FakeAccessEnforcer(CloudflareEnforcer):
@@ -107,6 +108,28 @@ class CloudflareFreePlanEnforcementTests(unittest.IsolatedAsyncioTestCase):
             "enforcement_expires_at": expires_at,
             "evidence": {"instance_ids": ["one"]},
         }
+
+    async def test_ip_access_capability_probe_uses_zone_access_rules_endpoint(self) -> None:
+        enforcer = FakeAccessEnforcer(self.config())
+        result = await enforcer.inspect_ip_access_capability("zone123456")
+        self.assertTrue(result["accessible"])
+        self.assertEqual(
+            result["permission"], "Account Firewall Access Rules Write"
+        )
+
+    async def test_ip_access_403_explains_required_cloudflare_permission(self) -> None:
+        class ForbiddenEnforcer(CloudflareEnforcer):
+            async def _request(self, method, path, *, payload=None, allow_404=False):
+                raise CloudflareEnforcementError(
+                    "Cloudflare API returned HTTP 403: Authentication error"
+                )
+
+        enforcer = ForbiddenEnforcer(self.config(), client=object())
+        with self.assertRaisesRegex(
+            CloudflareEnforcementError,
+            "Account Firewall Access Rules Edit",
+        ):
+            await enforcer.inspect_ip_access_capability("zone123456")
 
     async def test_long_block_uses_ip_access_without_custom_waf_slot(self) -> None:
         expires = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
