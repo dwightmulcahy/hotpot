@@ -274,12 +274,68 @@ class TransactionalCloudflareEnforcer(CloudflareEnforcer):
                     "Cloudflare verification found a drifted applied rule"
                 )
 
+    async def _rollback_verified_apply(
+        self, rule: dict[str, Any]
+    ) -> None:
+        provider = str(rule.get("provider") or CUSTOM_WAF_PROVIDER)
+        if provider == POOL_PROVIDER:
+            if rule.get("membership_added"):
+                await super().remove_rule(rule)
+            return
+
+        if provider == IP_ACCESS_PROVIDER:
+            if not rule.get("reused"):
+                await super().remove_rule(rule)
+                return
+            if not rule.get("expiry_extended"):
+                return
+            previous = str(rule.get("previous_expires_at") or "")
+            if not previous:
+                return
+            target_kind, normalized = access_target(
+                str(rule.get("target_value") or "")
+            )
+            account_id = str(rule.get("account_id") or "")
+            if str(rule.get("scope") or "") == "account" or account_id:
+                resource_id = account_id or str(self.config.account_id or "")
+                scope = "account"
+            else:
+                resource_id = str(rule.get("zone_id") or "")
+                scope = "zone"
+            if not resource_id:
+                return
+            current = await self.inspect_access_rule_for_metadata(rule)
+            if current is None:
+                return
+            await self._ip_access_request(
+                "PATCH",
+                f"{self._access_base(scope, resource_id)}/{rule.get('rule_id')}",
+                payload={
+                    "configuration": {
+                        "target": target_kind,
+                        "value": normalized,
+                    },
+                    "mode": "block",
+                    "notes": access_notes(previous, normalized),
+                },
+            )
+            return
+
+        if not rule.get("reused"):
+            await super().remove_rule(rule)
+
     async def apply(self, recommendation: dict[str, Any]) -> list[dict[str, Any]]:
+        rules: list[dict[str, Any]] = []
         try:
             rules = await super().apply(recommendation)
             await self._verify_rules(rules)
             return rules
         except Exception as exc:
+            for rule in reversed(rules):
+                try:
+                    await self._rollback_verified_apply(rule)
+                except Exception:
+                    pass
             residual = await self._residual_rules(recommendation)
             if residual:
                 raise CloudflareTransactionError(
