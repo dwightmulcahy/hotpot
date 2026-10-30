@@ -203,7 +203,7 @@ hosts = ["WWW.Example.COM"]
         template = (root / "dashboard" / "template.py").read_text(encoding="utf-8")
         self.assertIn("inspect_ip_access_capability", production)
         self.assertIn("cloudflare-ip-access:", production)
-        self.assertIn("Account Firewall Access Rules permission is available", production)
+        self.assertIn("Zone Firewall Services permission is available for long blocks", production)
         self.assertIn("Long blocks", template)
         self.assertIn("long_block_provider", template)
 

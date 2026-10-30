@@ -10,8 +10,9 @@ IP_ACCESS_PROVIDER = "ip_access"
 CUSTOM_WAF_PROVIDER = "custom_waf"
 HOT_POT_ACCESS_NOTES_PREFIX = "hotpot-long-block"
 IP_ACCESS_PERMISSION_HINT = (
-    "long blocks require Cloudflare Account Firewall Access Rules Edit "
-    "(API permission: Account Firewall Access Rules Write) scoped to the account"
+    "zone-scoped long blocks require Cloudflare Zone Firewall Services Edit "
+    "(API permission: Firewall Services Write) on the target zone; "
+    "Account Firewall Access Rules Write alone authorizes the account-scoped endpoint"
 )
 
 
@@ -77,7 +78,7 @@ class IPAccessMixin:
         return {
             "zone_id": zone_id,
             "accessible": True,
-            "permission": "Account Firewall Access Rules Write",
+            "permission": "Firewall Services Write",
         }
 
     async def inspect_access_rule(self, zone_id: str, rule_id: str):
