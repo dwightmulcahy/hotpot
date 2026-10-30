@@ -184,15 +184,19 @@ class IPAccessMixin:
         existing = await self._find_hotpot_account_access_rule(account_id, normalized)
         reused = existing is not None
         created = False
+        expiry_extended = False
+        previous_expires_at = None
         try:
             if reused:
                 rule_id = str(existing.get("id") or "")
                 notes = parse_access_notes(existing.get("notes"))
                 current = parse_iso(notes.get("expires"))
                 requested = parse_iso(expires_at)
+                previous_expires_at = current.isoformat() if current else None
                 effective = current.isoformat() if current else expires_at
                 if requested and (current is None or requested > current):
                     effective = requested.isoformat()
+                    expiry_extended = True
                     await self._ip_access_request(
                         "PATCH",
                         f"{base}/{rule_id}",
@@ -249,6 +253,8 @@ class IPAccessMixin:
                     target_value=normalized,
                     expires_at=expires_at,
                     shared=reused,
+                    expiry_extended=expiry_extended,
+                    previous_expires_at=previous_expires_at,
                 )
             ]
         except Exception:
@@ -278,14 +284,18 @@ class IPAccessMixin:
                 existing = await self._find_hotpot_access_rule(zone_id, normalized)
                 reused = existing is not None
                 base = self._access_base("zone", zone_id)
+                expiry_extended = False
+                previous_expires_at = None
                 if reused:
                     rule_id = str(existing.get("id") or "")
                     notes = parse_access_notes(existing.get("notes"))
                     current = parse_iso(notes.get("expires"))
                     requested = parse_iso(expires_at)
+                    previous_expires_at = current.isoformat() if current else None
                     effective = current.isoformat() if current else expires_at
                     if requested and (current is None or requested > current):
                         effective = requested.isoformat()
+                        expiry_extended = True
                         await self._ip_access_request(
                             "PATCH",
                             f"{base}/{rule_id}",
@@ -331,6 +341,8 @@ class IPAccessMixin:
                     provider=IP_ACCESS_PROVIDER,
                     target_value=normalized,
                     expires_at=expires_at,
+                    expiry_extended=expiry_extended,
+                    previous_expires_at=previous_expires_at,
                 )
                 stored.append(item)
                 if not reused:

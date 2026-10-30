@@ -93,6 +93,9 @@ class CloudflareEnforcer(PooledWAFMixin, IPAccessMixin, _LegacyEnforcer):
         account_id="",
         scope=None,
         shared=False,
+        membership_added=False,
+        expiry_extended=False,
+        previous_expires_at=None,
     ):
         if scope is None:
             if provider == IP_ACCESS_PROVIDER and account_id:
@@ -117,6 +120,9 @@ class CloudflareEnforcer(PooledWAFMixin, IPAccessMixin, _LegacyEnforcer):
             "zone_wide": provider == IP_ACCESS_PROVIDER and scope == "zone",
             "account_wide": provider == IP_ACCESS_PROVIDER and scope == "account",
             "shared": bool(shared or provider == POOL_PROVIDER),
+            "membership_added": bool(membership_added),
+            "expiry_extended": bool(expiry_extended),
+            "previous_expires_at": previous_expires_at,
             "pool_action": (
                 "recommend_block"
                 if provider == POOL_PROVIDER and action == "block"

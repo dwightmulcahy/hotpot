@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import unittest
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urlsplit
-
 from dashboard.cloudflare_enforcement import (
     IP_ACCESS_PROVIDER,
     POOL_PROVIDER,

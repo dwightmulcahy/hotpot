@@ -279,6 +279,7 @@ class PooledWAFMixin:
                     target_value=target,
                     scope="configured-hostnames",
                     shared=True,
+                    membership_added=membership_added,
                 )
                 stored.append(item)
                 if membership_added:

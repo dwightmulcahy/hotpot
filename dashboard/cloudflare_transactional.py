@@ -16,7 +16,8 @@ from .cloudflare_enforcement import (
     _parse_iso,
     build_expression,
 )
-from .cloudflare_pool import pool_definition, pool_members
+from .cloudflare_ip_access import access_notes, access_target
+from .cloudflare_pool import pool_definition
 
 
 @dataclass
