@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from .cloudflare_enforcement import CloudflareConfig, build_expression
+from .cloudflare_enforcement import (
+    IP_ACCESS_PROVIDER,
+    POOL_PROVIDER,
+    CloudflareConfig,
+    build_expression,
+)
+from .cloudflare_ip_access import access_target
+from .cloudflare_pool import pool_definition, pool_expression
 
 
 def _cloudflare_action(recommendation_action: str) -> str:
@@ -41,53 +48,113 @@ def build_enforcement_plan(
         target = config.targets[instance_id]
         by_zone.setdefault(target.zone_id, set()).update(target.hosts)
 
-    use_ip_access = action == "recommend_long_block" and target_type == "ip"
-    zones: list[dict[str, Any]] = []
-    for zone_id, host_values in sorted(by_zone.items()):
-        hosts = tuple(sorted(host_values))
-        if use_ip_access:
+    long_ip = action == "recommend_long_block" and target_type == "ip"
+    pooled_ip = (
+        action in {"recommend_challenge", "recommend_block"}
+        and target_type == "ip"
+    )
+
+    if long_ip:
+        account_id = str(config.account_id or "").strip()
+        if not account_id:
+            raise ValueError(
+                "HOTPOT_CLOUDFLARE_ACCOUNT_ID is required for account-wide long blocks"
+            )
+        _, normalized = access_target(target_value)
+        all_hosts = sorted(
+            {
+                host
+                for configured in config.targets.values()
+                for host in configured.hosts
+            }
+        )
+        zones = [
+            {
+                "zone_id": None,
+                "account_id": account_id,
+                "hosts": all_hosts,
+                "action": "block",
+                "provider": IP_ACCESS_PROVIDER,
+                "scope": "account",
+                "expression": f"ip.src eq {normalized}",
+                "ref": None,
+                "expected_effect": (
+                    "Cloudflare account-wide IP Access block across every zone "
+                    "in the configured Cloudflare account"
+                ),
+            }
+        ]
+        provider = IP_ACCESS_PROVIDER
+    else:
+        zones = []
+        for zone_id, host_values in sorted(by_zone.items()):
+            if pooled_ip:
+                all_zone_hosts = tuple(
+                    sorted(
+                        {
+                            host
+                            for configured in config.targets.values()
+                            if configured.zone_id == zone_id
+                            for host in configured.hosts
+                        }
+                    )
+                )
+                _, normalized = access_target(target_value)
+                _, ref = pool_definition(action)
+                expression = pool_expression({normalized}, all_zone_hosts)
+                zones.append(
+                    {
+                        "zone_id": zone_id,
+                        "account_id": None,
+                        "hosts": list(all_zone_hosts),
+                        "action": cf_action,
+                        "provider": POOL_PROVIDER,
+                        "scope": "configured-hostnames",
+                        "expression": expression,
+                        "ref": ref,
+                        "shared_rule": True,
+                        "expected_effect": (
+                            "Add this IP to Hotpot's shared per-zone "
+                            + (
+                                "managed-challenge"
+                                if action == "recommend_challenge"
+                                else "24-hour block"
+                            )
+                            + " WAF pool"
+                        ),
+                    }
+                )
+                continue
+
+            hosts = tuple(sorted(host_values))
+            expression = build_expression(target_type, target_value, hosts)
+            ref = f"hotpot_{recommendation_id[:20]}_{zone_id[:8]}"
             zones.append(
                 {
                     "zone_id": zone_id,
+                    "account_id": None,
                     "hosts": list(hosts),
-                    "action": "block",
-                    "provider": "ip_access",
-                    "scope": "zone",
-                    "expression": None,
-                    "ref": None,
+                    "action": cf_action,
+                    "provider": "custom_waf",
+                    "scope": "configured-hostnames",
+                    "expression": expression,
+                    "ref": ref,
+                    "shared_rule": False,
                     "expected_effect": (
-                        "Cloudflare zone-wide IP Access block; does not consume a "
-                        "custom WAF rule slot"
+                        "Cloudflare managed challenge for matching requests"
+                        if cf_action == "managed_challenge"
+                        else "Cloudflare block for matching requests"
                     ),
                 }
             )
-            continue
-
-        expression = build_expression(target_type, target_value, hosts)
-        ref = f"hotpot_{recommendation_id[:20]}_{zone_id[:8]}"
-        zones.append(
-            {
-                "zone_id": zone_id,
-                "hosts": list(hosts),
-                "action": cf_action,
-                "provider": "custom_waf",
-                "scope": "configured-hostnames",
-                "expression": expression,
-                "ref": ref,
-                "expected_effect": (
-                    "Cloudflare managed challenge for matching requests"
-                    if cf_action == "managed_challenge"
-                    else "Cloudflare block for matching requests"
-                ),
-            }
-        )
+        provider = POOL_PROVIDER if pooled_ip else "custom_waf"
 
     return {
         "recommendation_id": recommendation_id,
         "actor_key": recommendation.get("actor_key"),
         "recommendation_action": action,
         "cloudflare_action": cf_action,
-        "provider": "ip_access" if use_ip_access else "custom_waf",
+        "provider": provider,
         "target_type": target_type,
         "target_value": target_value,
         "duration_hours": recommendation.get("duration_hours"),
@@ -95,7 +162,8 @@ def build_enforcement_plan(
         or recommendation.get("expires_at"),
         "instance_ids": instance_ids,
         "zones": zones,
-        "zone_count": len(zones),
+        "zone_count": len(by_zone),
+        "account_wide": long_ip,
         "automatic_enforcement": False,
         "approval_required": True,
         "writes_performed": False,

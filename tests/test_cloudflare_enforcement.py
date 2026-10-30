@@ -66,7 +66,7 @@ class FakeCloudflareEnforcer(CloudflareEnforcer):
                         "id": "rule-existing",
                         "ref": "hotpot_rec123_zone1234",
                         "action": "block",
-                        "expression": '(ip.src eq 8.8.8.8) and (http.host eq "www.example.com")',
+                        "expression": '(cf.worker.upstream_zone eq "scanner.example") and (http.host eq "www.example.com")',
                         "enabled": True,
                     }
                 ]
@@ -111,10 +111,10 @@ class CloudflareEnforcerTests(unittest.IsolatedAsyncioTestCase):
     def recommendation(self):
         return {
             "recommendation_id": "rec123",
-            "actor_key": "8.8.8.8",
+            "actor_key": "worker-zone:scanner.example",
             "action": "recommend_block",
-            "target_type": "ip",
-            "target_value": "8.8.8.8",
+            "target_type": "cloudflare-worker-zone",
+            "target_value": "scanner.example",
             "enforcement_expires_at": "2026-10-08T00:00:00+00:00",
             "evidence": {"instance_ids": ["one"]},
         }
@@ -158,7 +158,7 @@ class CloudflareEnforcerTests(unittest.IsolatedAsyncioTestCase):
                     "rule_id": "rule-existing",
                     "ref": "hotpot_rec123_zone1234",
                     "action": "block",
-                    "expression": '(ip.src eq 8.8.8.8) and (http.host eq "www.example.com")',
+                    "expression": '(cf.worker.upstream_zone eq "scanner.example") and (http.host eq "www.example.com")',
                 }
             ],
         }
@@ -229,7 +229,7 @@ class EnforcementStoreTests(unittest.IsolatedAsyncioTestCase):
                         "rule_id": "rule-1",
                         "ref": "hotpot_test_zone1",
                         "action": "block",
-                        "expression": '(ip.src eq 8.8.8.8) and (http.host eq "www.example.com")',
+                        "expression": '(cf.worker.upstream_zone eq "scanner.example") and (http.host eq "www.example.com")',
                     }
                 ],
             )

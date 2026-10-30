@@ -68,9 +68,10 @@ class CloudflareCleanupQueue:
                 existing = conn.execute(
                     """
                     SELECT id FROM cloudflare_cleanup_jobs
-                    WHERE status = 'pending' AND zone_id = ? AND rule_id = ?
+                    WHERE status = 'pending' AND recommendation_id = ?
+                      AND zone_id = ? AND rule_id = ?
                     """,
-                    (zone_id, rule_id),
+                    (recommendation_id, zone_id, rule_id),
                 ).fetchone()
                 if existing:
                     continue

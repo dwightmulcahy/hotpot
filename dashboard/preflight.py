@@ -173,6 +173,23 @@ def run_preflight(*, check_bind: bool = True) -> dict:
                 else "Cloudflare enforcement is enabled but token or target mappings are missing"
             ),
         )
+        if enforcement_enabled:
+            account_id = os.getenv("HOTPOT_CLOUDFLARE_ACCOUNT_ID", "").strip()
+            if account_id:
+                _check(
+                    checks,
+                    "cloudflare-account",
+                    True,
+                    "Cloudflare account ID is configured for manual 7-day blocks",
+                )
+            else:
+                _check(
+                    checks,
+                    "cloudflare-account",
+                    True,
+                    "HOTPOT_CLOUDFLARE_ACCOUNT_ID is not configured; manual 7-day IP blocks will be unavailable",
+                    warning=True,
+                )
     except Exception as exc:
         _check(
             checks,

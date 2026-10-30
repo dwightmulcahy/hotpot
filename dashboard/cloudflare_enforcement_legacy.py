@@ -565,7 +565,11 @@ class CloudflareEnforcer:
 
             for observed in observed_rules:
                 ref = str(observed.get("ref") or "")
-                if not ref.startswith("hotpot_") or ref in expected_refs:
+                if (
+                    not ref.startswith("hotpot_")
+                    or ref.startswith("hotpot_pool_")
+                    or ref in expected_refs
+                ):
                     continue
                 orphans.append(
                     {

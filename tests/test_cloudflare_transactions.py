@@ -58,6 +58,27 @@ class CloudflareTransactionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(payload["success"])
         self.assertEqual(client.calls, 2)
 
+    async def test_cleanup_queue_keeps_distinct_memberships_on_shared_rule(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            queue = CloudflareCleanupQueue(Path(tmp))
+            shared = {
+                "provider": "custom_waf_pool",
+                "zone_id": "zone-a",
+                "ruleset_id": "ruleset-a",
+                "rule_id": "shared-rule",
+                "ref": "hotpot_pool_block",
+            }
+            first = {**shared, "target_value": "1.1.1.1"}
+            second = {**shared, "target_value": "2.2.2.2"}
+            self.assertEqual(await queue.enqueue("rec-a", [first]), 1)
+            self.assertEqual(await queue.enqueue("rec-b", [second]), 1)
+            pending = await queue.pending()
+            self.assertEqual(len(pending), 2)
+            self.assertEqual(
+                {row["rule"]["target_value"] for row in pending},
+                {"1.1.1.1", "2.2.2.2"},
+            )
+
     async def test_cleanup_jobs_are_durable_and_deduplicated(self):
         with tempfile.TemporaryDirectory() as tmp:
             queue = CloudflareCleanupQueue(Path(tmp))
