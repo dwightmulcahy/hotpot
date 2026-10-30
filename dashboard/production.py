@@ -830,7 +830,7 @@ class ProductionDashboard(core.Dashboard):
                         f"cloudflare-ip-access:{zone_id}",
                         f"Cloudflare long-block access {zone_id[:8]}…",
                         "pass",
-                        "Account Firewall Access Rules permission is available",
+                        "Zone Firewall Services permission is available for long blocks",
                         duration_ms=int((time.monotonic() - tick) * 1000),
                     )
                 except Exception as exc:

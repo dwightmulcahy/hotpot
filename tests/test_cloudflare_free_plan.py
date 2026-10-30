@@ -114,7 +114,7 @@ class CloudflareFreePlanEnforcementTests(unittest.IsolatedAsyncioTestCase):
         result = await enforcer.inspect_ip_access_capability("zone123456")
         self.assertTrue(result["accessible"])
         self.assertEqual(
-            result["permission"], "Account Firewall Access Rules Write"
+            result["permission"], "Firewall Services Write"
         )
 
     async def test_ip_access_403_explains_required_cloudflare_permission(self) -> None:
@@ -127,7 +127,7 @@ class CloudflareFreePlanEnforcementTests(unittest.IsolatedAsyncioTestCase):
         enforcer = ForbiddenEnforcer(self.config(), client=object())
         with self.assertRaisesRegex(
             CloudflareEnforcementError,
-            "Account Firewall Access Rules Edit",
+            "Zone Firewall Services Edit",
         ):
             await enforcer.inspect_ip_access_capability("zone123456")
 
