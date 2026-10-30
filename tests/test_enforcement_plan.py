@@ -18,7 +18,7 @@ class EnforcementPlanTests(unittest.TestCase):
             },
         )
 
-    def test_ip_plan_matches_host_scoped_block_without_network_writes(self) -> None:
+    def test_ip_plan_matches_shared_host_scoped_block_pool_without_network_writes(self) -> None:
         plan = build_enforcement_plan(
             {
                 "recommendation_id": "rec_1234567890abcdef",
@@ -35,8 +35,11 @@ class EnforcementPlanTests(unittest.TestCase):
         self.assertFalse(plan["writes_performed"])
         self.assertFalse(plan["network_calls_performed"])
         self.assertEqual(plan["zone_count"], 1)
+        self.assertEqual(plan["provider"], "custom_waf_pool")
+        self.assertTrue(plan["zones"][0]["shared_rule"])
+        self.assertEqual(plan["zones"][0]["ref"], "hotpot_pool_block")
         expression = plan["zones"][0]["expression"]
-        self.assertIn("ip.src eq 34.62.82.165", expression)
+        self.assertIn("ip.src in {34.62.82.165}", expression)
         self.assertIn('http.host eq "example.com"', expression)
         self.assertIn('http.host eq "www.example.com"', expression)
 
