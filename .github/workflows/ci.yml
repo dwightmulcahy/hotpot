@@ -13,7 +13,7 @@ permissions:
 jobs:
   lint:
     name: Shared Python lint
-    uses: dwightmulcahy/repo-template/.github/workflows/reusable-python-ci.yml@d89e9db45ba77fd32d95da02620476eada9c01cd
+    uses: dwightmulcahy/repo-template/.github/workflows/reusable-python-ci.yml@15c05e1fc09a7c0ef835b773f1ae43871d902879
     with:
       python-version: '3.12'
       install-command: python -m pip install --upgrade pip "ruff>=0.8" "pyflakes>=3.2"
