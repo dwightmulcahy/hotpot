@@ -41,6 +41,7 @@ class DashboardBackupTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(manifest.is_file())
             self.assertTrue(result["verified"])
             self.assertEqual(result["restore_verification"]["quick_check"], "ok")
+            self.assertEqual(result["restore_verification"]["method"], "direct-read-only")
             self.assertEqual(len(result["sha256"]), 64)
             persisted = json.loads(manifest.read_text(encoding="utf-8"))
             self.assertEqual(persisted["sha256"], result["sha256"])
@@ -63,6 +64,31 @@ class DashboardBackupTests(unittest.IsolatedAsyncioTestCase):
             rows = await manager.list_backups()
             self.assertEqual(len(rows), 2)
             self.assertTrue(all(row["verified"] for row in rows))
+
+    async def test_start_survives_initial_backup_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            "os.environ",
+            {"HOTPOT_DASHBOARD_BACKUPS_ENABLED": "true"},
+            clear=False,
+        ):
+            root = Path(directory)
+            self._database(root)
+            manager = DashboardBackupManager(root)
+            with patch.object(
+                manager,
+                "_backup_sync",
+                side_effect=sqlite3.OperationalError("database or disk is full"),
+            ):
+                await manager.start()
+            try:
+                self.assertIsNotNone(manager.task)
+                self.assertFalse(manager.task.done())
+                self.assertEqual(
+                    manager.last_error,
+                    "OperationalError: database or disk is full",
+                )
+            finally:
+                await manager.stop()
 
 
 if __name__ == "__main__":

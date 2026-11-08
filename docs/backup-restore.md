@@ -10,7 +10,9 @@ HOTPOT_DASHBOARD_BACKUP_INTERVAL_HOURS=24
 HOTPOT_DASHBOARD_BACKUP_KEEP=7
 ```
 
-Each operational backup is written under `/data/backups` with a JSON manifest containing its SHA-256 checksum, size, creation time, SQLite `quick_check` result, and restore-verification result. Before a backup is accepted, Hotpot restores it into a temporary SQLite database and requires `PRAGMA quick_check` to return `ok`.
+Each operational backup is written under `/data/backups` with a JSON manifest containing its SHA-256 checksum, size, creation time, SQLite `quick_check` result, and verification result. Before a backup is accepted, Hotpot opens the completed backup read-only in place and requires `PRAGMA quick_check` to return `ok`. Routine verification therefore does not require enough temporary storage for a second full copy of the database.
+
+A scheduled backup failure is recorded in the backup manager status but does not abort dashboard startup. Failed or partially verified operational backup files are removed automatically so repeated failures do not accumulate orphaned backups.
 
 The authenticated dashboard API exposes `GET /api/backups`. A CSRF-protected operator can request an immediate backup with `POST /api/backups/run` and `X-Hotpot-Action: backup-now`. Versioned `/api/v1/backups` equivalents are available as well.
 

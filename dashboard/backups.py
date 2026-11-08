@@ -5,7 +5,6 @@ import hashlib
 import json
 import os
 import sqlite3
-import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,24 +28,25 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _restore_verify(source: Path) -> dict[str, Any]:
-    with tempfile.TemporaryDirectory(prefix="hotpot-restore-") as directory:
-        restored = Path(directory) / "restored.sqlite3"
-        source_conn = sqlite3.connect(source, timeout=30)
-        destination_conn = sqlite3.connect(restored, timeout=30)
-        try:
-            source_conn.backup(destination_conn)
-            quick_row = destination_conn.execute("PRAGMA quick_check").fetchone()
-            quick = str(quick_row[0] if quick_row else "unknown")
-            schema_objects = int(
-                destination_conn.execute(
-                    "SELECT COUNT(*) FROM sqlite_master WHERE type IN ('table','index','trigger','view')"
-                ).fetchone()[0]
-            )
-        finally:
-            destination_conn.close()
-            source_conn.close()
-    return {"quick_check": quick, "schema_objects": schema_objects, "ok": quick.lower() == "ok"}
+def _verify_backup(source: Path) -> dict[str, Any]:
+    """Verify a completed backup in place without creating another full database copy."""
+    connection = sqlite3.connect(f"file:{source.resolve()}?mode=ro", uri=True, timeout=30)
+    try:
+        quick_row = connection.execute("PRAGMA quick_check").fetchone()
+        quick = str(quick_row[0] if quick_row else "unknown")
+        schema_objects = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type IN ('table','index','trigger','view')"
+            ).fetchone()[0]
+        )
+    finally:
+        connection.close()
+    return {
+        "quick_check": quick,
+        "schema_objects": schema_objects,
+        "ok": quick.lower() == "ok",
+        "method": "direct-read-only",
+    }
 
 
 class DashboardBackupManager:
@@ -70,7 +70,11 @@ class DashboardBackupManager:
     async def start(self) -> None:
         if not self.enabled:
             return
-        await self.maybe_backup()
+        try:
+            await self.maybe_backup()
+        except Exception as exc:
+            # A maintenance failure must not prevent the dashboard from starting.
+            self.last_error = f"{type(exc).__name__}: {exc}"
         if self.task is None or self.task.done():
             self.task = asyncio.create_task(self._loop(), name="hotpot-dashboard-backups")
 
@@ -123,29 +127,37 @@ class DashboardBackupManager:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
         self.backup_dir.mkdir(parents=True, exist_ok=True)
         destination = self.backup_dir / f"operational-{safe_label}-{stamp}.sqlite3"
-        online = _online_backup(self.source, destination)
-        checksum = _sha256(destination)
-        restore = _restore_verify(destination)
-        if online["quick_check"].lower() != "ok" or not restore["ok"]:
-            destination.unlink(missing_ok=True)
-            raise RuntimeError("backup failed integrity or restore verification")
-        created_epoch = destination.stat().st_mtime
-        manifest = {
-            "schema_version": 1,
-            "backup": destination.name,
-            "source": self.source.name,
-            "created_at": online["created_at"],
-            "created_epoch": created_epoch,
-            "size_bytes": online["size_bytes"],
-            "sha256": checksum,
-            "quick_check": online["quick_check"],
-            "restore_verification": restore,
-            "verified": True,
-        }
         manifest_path = destination.with_suffix(destination.suffix + ".json")
-        manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
-        self._rotate_sync()
-        return manifest
+        try:
+            online = _online_backup(self.source, destination)
+            checksum = _sha256(destination)
+            verification = _verify_backup(destination)
+            if online["quick_check"].lower() != "ok" or not verification["ok"]:
+                raise RuntimeError("backup failed integrity verification")
+            created_epoch = destination.stat().st_mtime
+            manifest = {
+                "schema_version": 1,
+                "backup": destination.name,
+                "source": self.source.name,
+                "created_at": online["created_at"],
+                "created_epoch": created_epoch,
+                "size_bytes": online["size_bytes"],
+                "sha256": checksum,
+                "quick_check": online["quick_check"],
+                # Keep the existing field name for API/manifest compatibility.
+                "restore_verification": verification,
+                "verified": True,
+            }
+            manifest_path.write_text(
+                json.dumps(manifest, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+            self._rotate_sync()
+            return manifest
+        except Exception:
+            destination.unlink(missing_ok=True)
+            manifest_path.unlink(missing_ok=True)
+            raise
 
     def _rotate_sync(self) -> None:
         backups = sorted(
@@ -186,5 +198,5 @@ class DashboardBackupManager:
             "last_error": self.last_error,
             "latest": rows[0] if rows else None,
             "backups": rows,
-            "restore_verification": "every backup is restored into a temporary SQLite database and quick_check is required to pass",
+            "restore_verification": "every backup is opened read-only in place and quick_check is required to pass",
         }

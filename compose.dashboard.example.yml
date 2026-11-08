@@ -34,8 +34,10 @@ services:
 
     read_only: true
 
+    # Routine backup verification no longer creates a full temporary
+    # database copy, but leave reasonable headroom for other temp work.
     tmpfs:
-      - /tmp:size=16m,mode=1777
+      - /tmp:size=128m,mode=1777
 
     security_opt:
       - no-new-privileges:true
