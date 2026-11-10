@@ -120,7 +120,7 @@ jobs:
           fetch-depth: 0
 
       - name: Generate conventional release notes
-        uses: dwightmulcahy/repo-template/.github/actions/release-notes@15c05e1fc09a7c0ef835b773f1ae43871d902879
+        uses: dwightmulcahy/repo-template/.github/actions/release-notes@cf8e0cc9cf440098778de4684e3df2e3de2a305e
         with:
           tag: ${{ github.ref_name }}
           project-name: "Hotpot"
