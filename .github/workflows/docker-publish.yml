@@ -72,7 +72,7 @@ jobs:
   publish:
     name: Publish Hotpot image
     needs: [ci, validate-tag]
-    uses: dwightmulcahy/repo-template/.github/workflows/reusable-docker-publish.yml@cf8e0cc9cf440098778de4684e3df2e3de2a305e
+    uses: dwightmulcahy/repo-template/.github/workflows/reusable-docker-publish.yml@f508f4b91a429dcbe7cfa6cdb6205f8d90f28042
     with:
       image: dwightmulcahy/hotpot
       tag: ${{ github.ref_name }}
@@ -90,7 +90,7 @@ jobs:
   publish-dashboard:
     name: Publish Hotpot dashboard
     needs: [ci, validate-tag]
-    uses: dwightmulcahy/repo-template/.github/workflows/reusable-docker-publish.yml@cf8e0cc9cf440098778de4684e3df2e3de2a305e
+    uses: dwightmulcahy/repo-template/.github/workflows/reusable-docker-publish.yml@f508f4b91a429dcbe7cfa6cdb6205f8d90f28042
     with:
       image: dwightmulcahy/hotpot-dashboard
       dockerfile: Dockerfile.dashboard
