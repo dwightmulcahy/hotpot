@@ -33,6 +33,15 @@ _SECRET_NAMES = (
     "HOTPOT_CLOUDFLARE_API_TOKEN",
 )
 STATIC_DIR = Path(__file__).with_name("static")
+# Release notes for the "What's new" dialog, written by the release image build
+# (scripts/build_changelog.py -> CHANGELOG_B64); absent in dev, so no dialog there
+CHANGELOG = STATIC_DIR / "changelog.json"
+WHATS_NEW_ASSET = (
+    '<style>:root{--wn-bg:var(--surface-2,#171d28);--wn-text:var(--text,#e5e7eb);'
+    "--wn-line:var(--line,#374151);--wn-accent:var(--info,#84aee8)}</style>\n"
+    '<script src="/static/whats-new.js" data-src="/static/changelog.json" '
+    'data-key="hotpot.seenVersion" defer></script>\n'
+)
 
 
 def _restore_environment(previous: dict[str, str | None]) -> None:
@@ -43,7 +52,7 @@ def _restore_environment(previous: dict[str, str | None]) -> None:
             os.environ[name] = value
 
 
-def dashboard_page() -> str:
+def dashboard_page(changelog: Path = CHANGELOG) -> str:
     """Attach static dashboard enhancements without runtime HTML string replacement."""
 
     head, head_marker, remainder = PRODUCTION_HTML.partition("</head>")
@@ -55,7 +64,7 @@ def dashboard_page() -> str:
     assets = (
         '<link rel="stylesheet" href="/static/observability.css">\n'
         '<script src="/static/security.js"></script>\n'
-    )
+    ) + (WHATS_NEW_ASSET if changelog.is_file() else "")
     scripts = (
         '<script src="/static/observability.js"></script>\n'
         '<script src="/static/campaigns.js"></script>\n'
