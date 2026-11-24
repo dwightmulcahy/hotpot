@@ -1,5 +1,6 @@
 import hmac
 import tempfile
+from tmp_cleanup import cleanup_tempdir
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -94,7 +95,7 @@ class ProductionHardeningTests(unittest.IsolatedAsyncioTestCase):
         await self.client.close()
         await self.upstream_server.close()
         self.env.stop()
-        self.tmp.cleanup()
+        cleanup_tempdir(self.tmp)
 
     async def test_untrusted_forwarded_proto_is_ignored_and_host_is_preserved(self):
         response = await self.client.get(
