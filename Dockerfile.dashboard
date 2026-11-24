@@ -24,6 +24,9 @@ RUN pip install --no-cache-dir -r requirements-dashboard.txt
 COPY sitecustomize.py ./sitecustomize.py
 COPY dashboard ./dashboard
 COPY hotpot_common ./hotpot_common
+# Release notes for the "What's new" dialog (base64 JSON from scripts/build_changelog.py)
+ARG CHANGELOG_B64=
+RUN if [ -n "${CHANGELOG_B64}" ]; then printf '%s' "${CHANGELOG_B64}" | base64 -d > dashboard/static/changelog.json; fi
 RUN mkdir -p /data && chown -R hotpot:hotpot /data /app
 USER 10001:10001
 EXPOSE 19090
