@@ -23,6 +23,7 @@ jobs:
       publish_minor: ${{ steps.aliases.outputs.minor }}
       publish_latest: ${{ steps.aliases.outputs.latest }}
       build_date: ${{ steps.build-metadata.outputs.build_date }}
+      changelog: ${{ steps.changelog.outputs.b64 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -63,6 +64,14 @@ jobs:
             fi
           done
 
+      - name: Bundle release notes for the "What's new" dialog
+        id: changelog
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/build_changelog.py --upto "$GITHUB_REF_NAME" --repository "$GITHUB_REPOSITORY" --output changelog.json
+          echo "b64=$(base64 -w0 changelog.json)" >> "$GITHUB_OUTPUT"
+
   ci:
     name: Verify release candidate
     needs: validate-tag
@@ -72,7 +81,7 @@ jobs:
   publish:
     name: Publish Hotpot image
     needs: [ci, validate-tag]
-    uses: dwightmulcahy/repo-template/.github/workflows/reusable-docker-publish.yml@cf8e0cc9cf440098778de4684e3df2e3de2a305e
+    uses: dwightmulcahy/repo-template/.github/workflows/reusable-docker-publish.yml@f508f4b91a429dcbe7cfa6cdb6205f8d90f28042
     with:
       image: dwightmulcahy/hotpot
       tag: ${{ github.ref_name }}
@@ -90,7 +99,7 @@ jobs:
   publish-dashboard:
     name: Publish Hotpot dashboard
     needs: [ci, validate-tag]
-    uses: dwightmulcahy/repo-template/.github/workflows/reusable-docker-publish.yml@cf8e0cc9cf440098778de4684e3df2e3de2a305e
+    uses: dwightmulcahy/repo-template/.github/workflows/reusable-docker-publish.yml@f508f4b91a429dcbe7cfa6cdb6205f8d90f28042
     with:
       image: dwightmulcahy/hotpot-dashboard
       dockerfile: Dockerfile.dashboard
@@ -102,6 +111,7 @@ jobs:
         HOTPOT_VERSION=${{ github.ref_name }}
         HOTPOT_GIT_SHA=${{ github.sha }}
         HOTPOT_BUILD_DATE=${{ needs.validate-tag.outputs.build_date }}
+        CHANGELOG_B64=${{ needs.validate-tag.outputs.changelog }}
     secrets:
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -120,7 +130,7 @@ jobs:
           fetch-depth: 0
 
       - name: Generate conventional release notes
-        uses: dwightmulcahy/repo-template/.github/actions/release-notes@cf8e0cc9cf440098778de4684e3df2e3de2a305e
+        uses: dwightmulcahy/repo-template/.github/actions/release-notes@f508f4b91a429dcbe7cfa6cdb6205f8d90f28042
         with:
           tag: ${{ github.ref_name }}
           project-name: "Hotpot"

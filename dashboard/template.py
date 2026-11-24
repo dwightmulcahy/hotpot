@@ -37,6 +37,7 @@ main{max-width:1540px;margin:auto;padding:22px 26px 42px}.view{display:none}.vie
         <span id="healthBadge" class="status-chip"><span class="dot ok"></span>Loading health</span>
         <button id="cloudflareBadge" class="status-chip" data-jump="enforcement" type="button">Cloudflare loading</button>
         <span id="updated" class="status-chip">Loading…</span>
+        <button class="status-chip" data-whats-new type="button" hidden>What's new</button>
       </div>
     </div>
     <nav class="tabs" aria-label="Dashboard sections">
