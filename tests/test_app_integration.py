@@ -1,4 +1,5 @@
 import tempfile
+from tmp_cleanup import cleanup_tempdir
 import unittest
 from pathlib import Path
 
@@ -65,7 +66,7 @@ class AppIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.client.close()
         await self.upstream_server.close()
-        self.tmp.cleanup()
+        cleanup_tempdir(self.tmp)
 
     async def test_normal_request_proxies(self):
         response = await self.client.get("/hello?x=1")

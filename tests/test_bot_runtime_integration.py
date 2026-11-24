@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+from tmp_cleanup import cleanup_tempdir
 import time
 import unittest
 from pathlib import Path
@@ -102,7 +103,7 @@ class BotRuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self) -> None:
         await self.client.close()
         await self.upstream_server.close()
-        self.tmp.cleanup()
+        cleanup_tempdir(self.tmp)
 
     async def test_verified_and_spoofed_bot_identity_is_persisted(self) -> None:
         verified = await self.client.get(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+from tmp_cleanup import cleanup_tempdir
 import unittest
 from pathlib import Path
 
@@ -67,7 +68,7 @@ class SourceIdentityRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.client.close()
         await self.upstream_server.close()
-        self.tmp.cleanup()
+        cleanup_tempdir(self.tmp)
 
     async def test_event_feed_and_status_expose_same_source_id(self):
         await self.client.get("/.env")

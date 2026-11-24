@@ -1,4 +1,5 @@
 import tempfile
+from tmp_cleanup import cleanup_tempdir
 import unittest
 from pathlib import Path
 
@@ -66,7 +67,7 @@ class RuntimeHardeningTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.client.close()
         await self.upstream_server.close()
-        self.tmp.cleanup()
+        cleanup_tempdir(self.tmp)
 
     async def test_live_and_readiness_are_distinct(self):
         live = await self.client.get("/_hotpot/live")

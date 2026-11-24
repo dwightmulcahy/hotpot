@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import tempfile
+from tmp_cleanup import cleanup_tempdir
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -226,7 +227,7 @@ class AutoResponseStateStoreTests(unittest.TestCase):
         self.store = AutoResponseStateStore(self.path)
 
     def tearDown(self) -> None:
-        self.tmp.cleanup()
+        cleanup_tempdir(self.tmp)
 
     def test_mode_override_is_persistent(self) -> None:
         initial = self.store.mode_state("off")

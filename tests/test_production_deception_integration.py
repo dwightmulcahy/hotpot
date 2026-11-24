@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+from tmp_cleanup import cleanup_tempdir
 import unittest
 from pathlib import Path
 
@@ -72,7 +73,7 @@ class ProductionDeceptionJourneyTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self) -> None:
         await self.client.close()
         await self.upstream_server.close()
-        self.tmp.cleanup()
+        cleanup_tempdir(self.tmp)
 
     async def test_wordpress_journey_stays_correlated_and_never_hits_upstream(self) -> None:
         headers = {

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+from tmp_cleanup import cleanup_tempdir
 import time
 import unittest
 from pathlib import Path
@@ -55,7 +56,7 @@ class IPverseBotIntelligenceTests(unittest.TestCase):
         self.intelligence._apply_payload(_payload())
 
     def tearDown(self) -> None:
-        self.tmp.cleanup()
+        cleanup_tempdir(self.tmp)
 
     def test_authoritative_claim_inside_range_is_verified(self) -> None:
         result = self.intelligence.identify(
