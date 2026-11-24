@@ -57,5 +57,23 @@ class DashboardArchitectureTests(unittest.TestCase):
         self.assertIn("def aggregate", legacy)
 
 
+class WhatsNewTests(unittest.TestCase):
+    def test_included_only_with_bundled_notes(self) -> None:
+        import tempfile
+
+        from dashboard import server
+
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "missing.json"
+            self.assertNotIn("whats-new.js", server.dashboard_page(missing))
+            notes = Path(tmp) / "changelog.json"
+            notes.write_text('{"current": "1.0.0", "releases": []}')
+            page = server.dashboard_page(notes)
+        self.assertIn('<script src="/static/whats-new.js" data-src="/static/changelog.json"', page)
+        self.assertLess(page.index("whats-new.js"), page.index("</head>"))
+        self.assertIn("data-whats-new", page)
+        self.assertTrue((server.STATIC_DIR / "whats-new.js").is_file())
+
+
 if __name__ == "__main__":
     unittest.main()
