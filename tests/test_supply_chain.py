@@ -42,7 +42,7 @@ class SupplyChainTests(unittest.TestCase):
         requirements = (root / "requirements-dashboard.txt").read_text(
             encoding="utf-8"
         )
-        self.assertIn("geoip2==5.3.0", requirements)
+        self.assertIn("geoip2==5.4.0", requirements)
         self.assertNotIn("geoip2>=", requirements)
 
     def test_dependabot_monitors_pip_docker_and_actions(self) -> None:
