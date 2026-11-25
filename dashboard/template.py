@@ -25,6 +25,7 @@ main{max-width:1540px;margin:auto;padding:22px 26px 42px}.view{display:none}.vie
 @media(max-width:1120px){.metrics{grid-template-columns:repeat(2,1fr)}.grid,.grid.equal,.grid.thirds,.split-panels{grid-template-columns:1fr}.app-strip{grid-template-columns:repeat(2,1fr)}}
 @media(max-width:720px){.topbar-inner,main{padding-left:14px;padding-right:14px}.brandline{align-items:flex-start;flex-direction:column}.header-state{justify-content:flex-start}.metrics{grid-template-columns:1fr 1fr}.metric-card{min-height:96px}.metric-value{font-size:26px}.app-strip{grid-template-columns:1fr}.drawer-metrics{grid-template-columns:repeat(2,1fr)}.history-row,.check-row{grid-template-columns:90px 1fr}.history-row>:nth-child(3),.history-row>:nth-child(4),.check-row>:nth-child(3),.check-row>:nth-child(4){display:none}}
 @media(max-width:430px){.metrics{grid-template-columns:1fr}.tabs{margin-left:-4px;margin-right:-4px}.tab{padding-left:10px;padding-right:10px}}
+.toast-stack{position:fixed;right:18px;bottom:18px;z-index:80;display:flex;flex-direction:column;gap:8px;max-width:min(380px,calc(100vw - 32px))}.toast{display:flex;gap:10px;align-items:flex-start;border:1px solid var(--line);background:var(--surface-3);border-radius:10px;padding:11px 13px;box-shadow:var(--shadow);font-size:13px;animation:toast-in .16s ease-out}.toast.ok{border-color:#2e5547;background:var(--good-bg)}.toast.fail{border-color:#66353b;background:var(--bad-bg)}.toast-title{font-weight:700}.toast-detail{color:var(--muted);font-size:12px;margin-top:2px;overflow-wrap:anywhere}.toast-close{margin-left:auto;background:none;border:0;color:var(--muted);cursor:pointer;font-size:15px;line-height:1;padding:0 0 0 6px}.toast-icon{flex:0 0 auto;width:16px;height:16px;margin-top:1px;display:grid;place-items:center;font-weight:800}.toast.ok .toast-icon{color:var(--good)}.toast.fail .toast-icon{color:var(--bad)}.spinner{width:14px;height:14px;border:2px solid var(--line);border-top-color:var(--info);border-radius:50%;animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}@keyframes toast-in{from{opacity:0;transform:translateY(6px)}}@media (prefers-reduced-motion:reduce){.spinner,.toast{animation:none}}
 </style>
 </head>
 <body>
@@ -150,11 +151,24 @@ function showView(name,{updateHash=true}={}){
   if(name==='enforcement')loadResponseHistory(false);
 }
 
-async function actionRequest(id,verb){
-  const r=await fetch('/api/recommendation/'+encodeURIComponent(id)+'/'+verb,{method:'POST',headers:{'X-Hotpot-Action':verb}});
-  let body=null;try{body=await r.json()}catch(e){}
-  if(!r.ok){const msg=body?.enforcement_error||body?.error||body?.message||await r.text().catch(()=>null)||('HTTP '+r.status);alert(verb[0].toUpperCase()+verb.slice(1)+' failed: '+msg);return false}
-  return true;
+function toast(title,detail='',state='busy'){
+  let stack=document.getElementById('toastStack');
+  if(!stack){stack=document.createElement('div');stack.id='toastStack';stack.className='toast-stack';stack.setAttribute('role','status');stack.setAttribute('aria-live','polite');document.body.appendChild(stack)}
+  const el=document.createElement('div');stack.appendChild(el);let timer=null;
+  const set=(t,d,st)=>{clearTimeout(timer);el.className='toast '+st;el.innerHTML=`<span class="toast-icon">${st==='busy'?'<span class="spinner"></span>':st==='ok'?'✓':'!'}</span><div><div class="toast-title">${esc(t)}</div>${d?`<div class="toast-detail">${esc(d)}</div>`:''}</div>${st==='busy'?'':'<button class="toast-close" type="button" aria-label="Close">×</button>'}`;const c=el.querySelector('.toast-close');if(c)c.onclick=()=>el.remove();if(st==='ok')timer=setTimeout(()=>el.remove(),4000)};
+  set(title,detail,state);return{update:set,close:()=>el.remove()};
+}
+const ACTION_PROGRESS={approve:['Applying Cloudflare enforcement…','Creating the rule and verifying it with Cloudflare','Cloudflare enforcement applied'],dismiss:['Dismissing recommendation…','','Recommendation dismissed'],remove:['Removing Cloudflare rules…','Deleting the rules and verifying removal','Cloudflare rules removed']};
+async function actionRequest(id,verb,subject=''){
+  const [busy,busyDetail,done]=ACTION_PROGRESS[verb]||[verb+'…','',verb+' complete'];
+  const buttons=[...document.querySelectorAll('[data-rec-action][data-id="'+CSS.escape(id)+'"]')];buttons.forEach(b=>b.disabled=true);
+  const t=toast(busy,[subject,busyDetail].filter(Boolean).join(' · '));const started=performance.now();
+  try{
+    const r=await fetch('/api/recommendation/'+encodeURIComponent(id)+'/'+verb,{method:'POST',headers:{'X-Hotpot-Action':verb}});
+    const raw=await r.text().catch(()=>'');let body=null;try{body=JSON.parse(raw)}catch(e){}
+    if(!r.ok){const msg=body?.enforcement_error||body?.error||body?.message||raw||('HTTP '+r.status);t.update(verb[0].toUpperCase()+verb.slice(1)+' failed',msg,'fail');buttons.forEach(b=>b.disabled=false);return false}
+    t.update(done,[subject,((performance.now()-started)/1000).toFixed(1)+'s'].filter(Boolean).join(' · '),'ok');return true;
+  }catch(e){t.update(verb[0].toUpperCase()+verb.slice(1)+' failed',String(e?.message||e),'fail');buttons.forEach(b=>b.disabled=false);return false}
 }
 async function dismissRec(id){if(!confirm('Dismiss this recommendation for the configured cooldown?'))return;if(await actionRequest(id,'dismiss')){await load();await loadResponseHistory(true)}}
 async function approveRec(id,label,target,duration,action,targetType){
@@ -163,7 +177,7 @@ async function approveRec(id,label,target,duration,action,targetType){
   else if(targetType==='ip'&&(action==='recommend_challenge'||action==='recommend_block'))detail='Hotpot will add this IP to the shared per-zone WAF '+(action==='recommend_challenge'?'Managed Challenge':'24-hour Block')+' pool for configured protected hostnames. The shared rule remains while other IPs are active.';
   else detail='Hotpot will create temporary WAF enforcement only for the configured protected hostnames and automatically remove it at expiry.';
   if(!confirm('Approve Cloudflare '+label+' for '+duration+' hours?\n\nTarget: '+target+'\n\n'+detail))return;
-  if(await actionRequest(id,'approve')){await load();await loadResponseHistory(true)}
+  if(await actionRequest(id,'approve',label+' · '+target)){await load();await loadResponseHistory(true)}
 }
 async function removeRec(id){if(!confirm('Remove these Hotpot Cloudflare rules now?'))return;if(await actionRequest(id,'remove')){await load();await loadResponseHistory(true)}}
 

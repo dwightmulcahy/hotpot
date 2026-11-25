@@ -208,6 +208,15 @@ hosts = ["WWW.Example.COM"]
         self.assertIn("7-day long block", template)
         self.assertIn("long_block_ready", template)
 
+    def test_recommendation_actions_show_progress_toast(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        template = (root / "dashboard" / "template.py").read_text(encoding="utf-8")
+        self.assertIn("function toast(", template)
+        self.assertIn("ACTION_PROGRESS", template)
+        self.assertIn("Applying Cloudflare enforcement", template)
+        self.assertIn('aria-live', template)
+        self.assertNotIn("alert(verb[0].toUpperCase()", template)
+
     def test_dashboard_image_copies_server_header_hardening(self) -> None:
         root = Path(__file__).resolve().parents[1]
         dockerfile = (root / "Dockerfile.dashboard").read_text(encoding="utf-8")
